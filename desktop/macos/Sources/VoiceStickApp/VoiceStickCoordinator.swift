@@ -141,6 +141,8 @@ final class VoiceStickCoordinator {
     private var asrStarted = false
     private var sentFinalAudioChunk = false
     private var pastedFinalText = false
+    private var pendingSecondaryReturn = false
+    private var pendingPrimaryReturn = false
     private var waitingForAudioEnd = false
     private var audioEndTimeoutTimer: Timer?
     private var pendingPasteState = PendingPasteState.idle
@@ -474,12 +476,30 @@ final class VoiceStickCoordinator {
             cancelSubtitleCycles(peripheralID: peripheralID, reason: "secondary_cancel")
             return
         }
+
+        if pendingSecondaryReturn,
+           pendingPasteState.isIdle,
+           !mainInputState.isBusy,
+           !isWaitingForFinalText {
+            pendingSecondaryReturn = false
+            inputInjector.pressReturn()
+            return
+        }
+
         cancelPendingPaste(peripheralID: peripheralID)
     }
 
     private func handlePrimaryButtonDown(sessionID: UInt32?, peripheralID: UUID) {
         if config.defaultOutputProfile.target == .subtitle {
             handleSubtitlePrimaryButtonDown(sessionID: sessionID, peripheralID: peripheralID)
+            return
+        }
+        if pendingPrimaryReturn,
+           pendingPasteState.isIdle,
+           !mainInputState.isBusy,
+           !isWaitingForFinalText {
+            pendingPrimaryReturn = false
+            inputInjector.pressReturn()
             return
         }
         if handleFrontButtonDuringPendingPaste(peripheralID: peripheralID) {
@@ -506,6 +526,8 @@ final class VoiceStickCoordinator {
         asrStarted = false
         sentFinalAudioChunk = false
         pastedFinalText = false
+        pendingSecondaryReturn = false
+        pendingPrimaryReturn = false
         pendingPasteState = .idle
         isShowingASRError = false
         oggMuxer.reset()
@@ -1148,6 +1170,8 @@ final class VoiceStickCoordinator {
         NSLog("ASR error: \(message)")
         cancelAudioEndTimeout()
         asr.cancel()
+        pendingSecondaryReturn = false
+        pendingPrimaryReturn = false
         pendingPasteState = .idle
         debugAudioRecorder.discard()
         isShowingASRError = true
@@ -1207,6 +1231,8 @@ final class VoiceStickCoordinator {
 
     private func completePendingPaste(text: String) {
         let shouldPressEnter = config.autoEnter
+        pendingSecondaryReturn = config.sideEnter
+        pendingPrimaryReturn = config.primaryEnter
         pendingPasteState = .idle
         finishRecognitionCycle()
         statusController.setStatus("Ready")

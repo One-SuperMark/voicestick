@@ -32,6 +32,11 @@ final class InputInjector {
         }
     }
 
+    func pressReturn() {
+        NSLog("InputInjector secondary_return")
+        sendReturn()
+    }
+
     private func sendCommandV() {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return }
         let commandDown = CGEvent(keyboardEventSource: source, virtualKey: 0x37, keyDown: true)

@@ -9,9 +9,9 @@ enum ASRProvider: String {
     var displayName: String {
         switch self {
         case .voiceStickCloud:
-            return "VoiceStick Cloud"
+            return "VoiceStick 云端"
         case .volcengine:
-            return "Volcengine"
+            return "火山引擎"
         }
     }
 }
@@ -23,9 +23,9 @@ enum InteractionMode: String {
     var displayName: String {
         switch self {
         case .holdToTalk:
-            return "Hold to Talk"
+            return "按住说话"
         case .clickToTalk:
-            return "Click to Talk"
+            return "点击开始/结束"
         }
     }
 }
@@ -41,17 +41,17 @@ enum OverlayThemeColor: String, CaseIterable {
     var displayName: String {
         switch self {
         case .white:
-            return "White"
+            return "白色"
         case .pink:
-            return "Pink"
+            return "粉色"
         case .green:
-            return "Green"
+            return "绿色"
         case .yellow:
-            return "Yellow"
+            return "黄色"
         case .blue:
-            return "Blue"
+            return "蓝色"
         case .purple:
-            return "Purple"
+            return "紫色"
         }
     }
 }
@@ -66,15 +66,15 @@ enum OverlayPosition: String, CaseIterable {
     var displayName: String {
         switch self {
         case .center:
-            return "Center"
+            return "居中"
         case .topLeft:
-            return "Top Left"
+            return "左上"
         case .topRight:
-            return "Top Right"
+            return "右上"
         case .bottomLeft:
-            return "Bottom Left"
+            return "左下"
         case .bottomRight:
-            return "Bottom Right"
+            return "右下"
         }
     }
 }
@@ -86,9 +86,9 @@ enum OutputTarget: String, CaseIterable {
     var displayName: String {
         switch self {
         case .focusedApp:
-            return "Focused App"
+            return "当前输入框"
         case .subtitle:
-            return "Subtitle"
+            return "字幕"
         }
     }
 }
@@ -100,9 +100,9 @@ enum TextTransform: String, CaseIterable {
     var displayName: String {
         switch self {
         case .original:
-            return "Original"
+            return "原文"
         case .translate:
-            return "Translate"
+            return "翻译"
         }
     }
 }
@@ -140,6 +140,8 @@ struct AppConfig {
     var defaultOutputProfile: OutputProfile
     var deviceOutputProfiles: [String: OutputProfile]
     var autoEnter: Bool
+    var sideEnter: Bool
+    var primaryEnter: Bool
     var debugAudioCache: Bool
     var debugAudioDirectory: URL
 
@@ -194,6 +196,8 @@ struct AppConfig {
             defaultOutputProfile: .default,
             deviceOutputProfiles: [:],
             autoEnter: true,
+            sideEnter: false,
+            primaryEnter: false,
             debugAudioCache: false,
             debugAudioDirectory: defaultDebugAudioDirectory
         )
@@ -210,6 +214,12 @@ struct AppConfig {
             return loadLegacy(text: text, defaults: defaults)
         }
 
+        let autoEnter = file.auto_enter ?? defaults.autoEnter
+        let sideEnter = file.side_enter ?? !autoEnter
+        let primaryEnter = file.primary_enter ?? false
+        let normalizedSideEnter = autoEnter ? false : sideEnter
+        let normalizedPrimaryEnter = autoEnter || normalizedSideEnter ? false : primaryEnter
+        let interactionMode = interactionModeValue(file.interaction_mode, default: defaults.interactionMode)
         return AppConfig(
             asrProvider: asrProviderValue(file.asr_provider, default: defaults.asrProvider),
             voiceStickAPIKey: file.voicestick_api_key ?? defaults.voiceStickAPIKey,
@@ -218,7 +228,7 @@ struct AppConfig {
             llmBaseURL: file.llm_base_url ?? defaults.llmBaseURL,
             llmAPIKey: file.llm_api_key ?? defaults.llmAPIKey,
             llmModel: file.llm_model ?? defaults.llmModel,
-            interactionMode: interactionModeValue(file.interaction_mode, default: defaults.interactionMode),
+            interactionMode: normalizedPrimaryEnter ? .holdToTalk : interactionMode,
             resourceID: resourceIDValue(file.resource_id, default: defaults.resourceID),
             asrHotwords: hotwordList(file.asr_hotwords ?? ""),
             pairedDeviceIDs: deviceIDList(file.paired_device_ids ?? ""),
@@ -239,7 +249,9 @@ struct AppConfig {
                     default: defaults.defaultOutputProfile
                 )
             ),
-            autoEnter: file.auto_enter ?? defaults.autoEnter,
+            autoEnter: autoEnter,
+            sideEnter: normalizedSideEnter,
+            primaryEnter: normalizedPrimaryEnter,
             debugAudioCache: file.debug_audio_cache ?? defaults.debugAudioCache,
             debugAudioDirectory: directoryValue(file.debug_audio_dir, default: defaults.debugAudioDirectory)
         )
@@ -262,6 +274,8 @@ struct AppConfig {
         device_theme_colors = "\(deviceThemeColorText.tomlEscaped)"
         device_overlay_positions = "\(deviceOverlayPositionText.tomlEscaped)"
         auto_enter = \(autoEnter.tomlValue)
+        side_enter = \(sideEnter.tomlValue)
+        primary_enter = \(primaryEnter.tomlValue)
         debug_audio_cache = \(debugAudioCache.tomlValue)
         debug_audio_dir = "\(debugAudioDirectory.path.tomlEscaped)"
 
@@ -285,6 +299,12 @@ struct AppConfig {
                 parts[1].trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
         }
 
+        let autoEnter = boolValue(values["auto_enter"], default: defaults.autoEnter)
+        let sideEnter = boolValue(values["side_enter"], default: !autoEnter)
+        let primaryEnter = boolValue(values["primary_enter"], default: false)
+        let normalizedSideEnter = autoEnter ? false : sideEnter
+        let normalizedPrimaryEnter = autoEnter || normalizedSideEnter ? false : primaryEnter
+        let interactionMode = interactionModeValue(values["interaction_mode"], default: defaults.interactionMode)
         return AppConfig(
             asrProvider: asrProviderValue(values["asr_provider"], default: defaults.asrProvider),
             voiceStickAPIKey: values["voicestick_api_key"] ?? defaults.voiceStickAPIKey,
@@ -293,7 +313,7 @@ struct AppConfig {
             llmBaseURL: values["llm_base_url"] ?? defaults.llmBaseURL,
             llmAPIKey: values["llm_api_key"] ?? defaults.llmAPIKey,
             llmModel: values["llm_model"] ?? defaults.llmModel,
-            interactionMode: interactionModeValue(values["interaction_mode"], default: defaults.interactionMode),
+            interactionMode: normalizedPrimaryEnter ? .holdToTalk : interactionMode,
             resourceID: resourceIDValue(values["resource_id"], default: defaults.resourceID),
             asrHotwords: hotwordList(values["asr_hotwords"] ?? ""),
             pairedDeviceIDs: deviceIDList(values["paired_device_ids"] ?? ""),
@@ -306,7 +326,9 @@ struct AppConfig {
                 default: defaults.defaultOutputProfile
             ),
             deviceOutputProfiles: [:],
-            autoEnter: boolValue(values["auto_enter"], default: defaults.autoEnter),
+            autoEnter: autoEnter,
+            sideEnter: normalizedSideEnter,
+            primaryEnter: normalizedPrimaryEnter,
             debugAudioCache: boolValue(values["debug_audio_cache"], default: defaults.debugAudioCache),
             debugAudioDirectory: directoryValue(values["debug_audio_dir"], default: defaults.debugAudioDirectory)
         )
@@ -529,6 +551,8 @@ private struct ConfigFile: Decodable {
     var device_theme_colors: String?
     var device_overlay_positions: String?
     var auto_enter: Bool?
+    var side_enter: Bool?
+    var primary_enter: Bool?
     var debug_audio_cache: Bool?
     var debug_audio_dir: String?
     var output: OutputConfigFile?

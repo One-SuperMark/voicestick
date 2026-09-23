@@ -33,10 +33,9 @@ let package = Package(
                 ])
             ]
         ),
-        .target(
+        .systemLibrary(
             name: "CZlib",
-            path: "Sources/CZlib",
-            publicHeadersPath: "."
+            path: "Sources/CZlib"
         )
     ]
 )

@@ -25,7 +25,7 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - During recognition, the macOS app shows a floating overlay and menu bar status. The firmware display stays in the thinking state after button release until the text is pasted or cancelled.
 - Final text enters a 1.2 second confirmation countdown.
 - Pressing the front button during the countdown pauses auto-paste. Pressing the front button again confirms paste; pressing the side button cancels it.
-- Pressing the side button while idle restores the last recoverable input confirmation.
+- When `side_enter` or `primary_enter` is enabled, clicking the selected hardware button once after a final result was pasted sends Return. Those manual-send modes are mutually exclusive with automatic Return; the desktop menu retains **Restore Last Input** for the last recoverable confirmation.
 - Optional debug audio cache saves each valid recognition session as Ogg Opus, with the source device ID included in the file name when available.
 - Firmware updates are checked from a signed-by-hash manifest on app launch, device connect/reconnect, and manual menu refresh. Updates are offered per connected device.
 - The firmware screen shows pairing, ready, listening, thinking, pending confirmation, error, and battery states based on app-sent `ui_state` updates. It dims after 30 seconds of inactivity. On battery power it enters deep sleep after 5 minutes; while charging or USB powered it stays at the dimmed-screen stage. The front button wakes it from deep sleep.
@@ -34,7 +34,7 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 
 - Board: M5Stack StickS3 / ESP32-S3-PICO-1-N8R8
 - Front button: GPIO11, protocol `primary`, push-to-talk and deep-sleep wake
-- Side button: GPIO12, protocol `secondary`, cancel or restore the last input confirmation
+- Side button: GPIO12, protocol `secondary`, cancel an active interaction or submit a manually pasted result
 - PMIC IRQ: GPIO13
 - Audio codec: ES8311 over I2S, 16 kHz / 16 bit / mono
 - Display: 135 x 240 ST7789P3 portrait screen
@@ -47,7 +47,8 @@ Main pin definitions live in `firmware/components/stick_s3_board/include/stick_s
 | State | Front button | Side button |
 | --- | --- | --- |
 | Unpaired / disconnected | No recording; screen shows `VS-XXXX` | No effective action |
-| Connected idle | Hold to record | Restore last input confirmation |
+| Connected idle after a manual paste with a manual-send option enabled | The selected side or front key presses Return once | Press Return once when side send is enabled |
+| Connected idle otherwise | Hold to record | No action (use the desktop menu to restore the last input confirmation) |
 | Recording | Release to finish recording | Does not cancel the active recording |
 | Thinking / finalizing | New recording is ignored | Cancel the in-progress recognition |
 | Pending confirmation countdown | Pause auto-paste and keep pending confirmation | Cancel pending text |
@@ -55,7 +56,7 @@ Main pin definitions live in `firmware/components/stick_s3_board/include/stick_s
 
 The firmware reports raw button facts (`button_down` / `button_up` with
 `primary` or `secondary`). The macOS app owns the interaction state machine and
-sends `ui_state` updates back to the firmware for the screen.
+sends `ui_state` updates back to the firmware for the screen. When `side_enter = true`, the side button sends Return once after a recognized result has been pasted; when `primary_enter = true`, the front button does the same. Either manual-send option is mutually exclusive with `auto_enter`; `primary_enter` is also mutually exclusive with click-to-talk mode. All three send modes can be disabled.
 
 By default the paste flow presses Return after paste. Disable `Press Return after paste` in settings, or set `auto_enter = false` in the config file, to paste without sending Return.
 
@@ -234,6 +235,8 @@ paired_device_ids = ""
 device_theme_colors = ""
 device_overlay_positions = ""
 auto_enter = true
+side_enter = false
+primary_enter = false
 debug_audio_cache = false
 # debug_audio_dir = "~/Library/Application Support/VoiceStick/DebugAudio"
 
@@ -266,6 +269,8 @@ Fields:
 | `device_theme_colors` | Optional per-device overlay colors, for example `C3D8:pink,09AF:green` |
 | `device_overlay_positions` | Optional per-device overlay positions, for example `C3D8:top_left,09AF:bottom_right` |
 | `auto_enter` | Whether to press Return after paste |
+| `side_enter` | Whether the side button sends Return after a manual paste; mutually exclusive with `auto_enter` |
+| `primary_enter` | Whether the front button sends Return after a manual paste; mutually exclusive with `auto_enter`, `side_enter`, and click-to-talk |
 | `debug_audio_cache` | Whether to save debug Ogg Opus files |
 | `debug_audio_dir` | Debug audio output directory |
 | `[output].target` | `focused_app` or `subtitle` |

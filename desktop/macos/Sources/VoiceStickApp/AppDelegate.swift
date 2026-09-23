@@ -1,5 +1,4 @@
 import AppKit
-import Sparkle
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusController: StatusController?
@@ -8,7 +7,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pairDeviceWindowController: PairDeviceWindowController?
     private var onboardingWindowController: OnboardingWindowController?
     private var firmwareUpdateWindowController: FirmwareUpdateWindowController?
-    private var updaterController: SPUStandardUpdaterController?
     private var dockIconWindowIDs = Set<ObjectIdentifier>()
     private var config = AppConfig.defaults
 
@@ -28,20 +26,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(appItem)
 
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Quit VoiceStick", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "退出 VoiceStick", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
         let editItem = NSMenuItem()
         mainMenu.addItem(editItem)
 
-        let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "Z")
         editMenu.addItem(NSMenuItem.separator())
-        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "复制", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = editMenu
 
         NSApp.mainMenu = mainMenu
@@ -55,6 +53,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             deviceOverlayPositions: config.deviceOverlayPositions,
             interactionMode: config.interactionMode,
             autoEnter: config.autoEnter,
+            sideEnter: config.sideEnter,
+            primaryEnter: config.primaryEnter,
             defaultOutputProfile: config.defaultOutputProfile,
             deviceOutputProfiles: config.deviceOutputProfiles
         )
@@ -74,7 +74,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.statusController?.setDeviceOverlayPositions(config.deviceOverlayPositions)
                 self?.statusController?.setInputOptions(
                     interactionMode: config.interactionMode,
-                    autoEnter: config.autoEnter
+                    autoEnter: config.autoEnter,
+                    sideEnter: config.sideEnter,
+                    primaryEnter: config.primaryEnter
                 )
                 self?.statusController?.setDefaultOutputProfile(config.defaultOutputProfile)
                 self?.statusController?.setDeviceOutputProfiles(config.deviceOutputProfiles)
@@ -104,10 +106,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.coordinator?.restoreLastInputConfirmation() ?? false
         }
         statusController.onSetInteractionMode = { [weak self] mode in
-            self?.updateInputOptions(interactionMode: mode, autoEnter: nil)
+            self?.updateInputOptions(interactionMode: mode, autoEnter: nil, sideEnter: nil, primaryEnter: nil)
         }
         statusController.onSetAutoEnter = { [weak self] autoEnter in
-            self?.updateInputOptions(interactionMode: nil, autoEnter: autoEnter)
+            self?.updateInputOptions(interactionMode: nil, autoEnter: autoEnter, sideEnter: nil, primaryEnter: nil)
+        }
+        statusController.onSetSideEnter = { [weak self] sideEnter in
+            self?.updateInputOptions(interactionMode: nil, autoEnter: nil, sideEnter: sideEnter, primaryEnter: nil)
+        }
+        statusController.onSetPrimaryEnter = { [weak self] primaryEnter in
+            self?.updateInputOptions(interactionMode: nil, autoEnter: nil, sideEnter: nil, primaryEnter: primaryEnter)
         }
         statusController.onSetDefaultOutputProfile = { [weak self] profile in
             self?.updateDefaultOutputProfile(profile)
@@ -121,35 +129,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusController.onSetDeviceOverlayPosition = { [weak self] deviceID, position in
             self?.updateDeviceOverlayPosition(deviceID: deviceID, position: position)
         }
-        if Self.hasSparklePublicKey {
-            let updaterController = SPUStandardUpdaterController(
-                startingUpdater: true,
-                updaterDelegate: nil,
-                userDriverDelegate: nil
-            )
-            self.updaterController = updaterController
-            statusController.onCheckForUpdates = {
-                updaterController.updater.checkForUpdates()
-            }
-        }
-        statusController.setStatus(config.pairedDeviceIDs.isEmpty ? "Pair a VoiceStick" : "Ready")
+        statusController.setStatus(config.pairedDeviceIDs.isEmpty ? "需要配对设备" : "准备就绪")
         coordinator.start()
     }
 
-    private func updateInputOptions(interactionMode: InteractionMode?, autoEnter: Bool?) {
+    private func updateInputOptions(interactionMode: InteractionMode?, autoEnter: Bool?, sideEnter: Bool?, primaryEnter: Bool?) {
         var config = self.config
         if let interactionMode {
             config.interactionMode = interactionMode
+            if interactionMode == .clickToTalk {
+                config.primaryEnter = false
+            }
         }
         if let autoEnter {
             config.autoEnter = autoEnter
+            if autoEnter {
+                config.sideEnter = false
+                config.primaryEnter = false
+            }
+        }
+        if let sideEnter {
+            config.sideEnter = sideEnter
+            if sideEnter {
+                config.autoEnter = false
+                config.primaryEnter = false
+            }
+        }
+        if let primaryEnter {
+            config.primaryEnter = primaryEnter
+            if primaryEnter {
+                config.autoEnter = false
+                config.sideEnter = false
+                config.interactionMode = .holdToTalk
+            }
         }
         do {
             try config.save()
             self.config = config
             statusController?.setInputOptions(
                 interactionMode: config.interactionMode,
-                autoEnter: config.autoEnter
+                autoEnter: config.autoEnter,
+                sideEnter: config.sideEnter,
+                primaryEnter: config.primaryEnter
             )
             coordinator?.updateConfig(config)
         } catch {
@@ -246,13 +267,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.dockTile.contentView = dockView
             NSApp.dockTile.display()
         }
-    }
-
-    private static var hasSparklePublicKey: Bool {
-        guard let publicKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String else {
-            return false
-        }
-        return !publicKey.isEmpty && !publicKey.hasPrefix("REPLACE_WITH")
     }
 
     private func showPairDeviceWindow() {

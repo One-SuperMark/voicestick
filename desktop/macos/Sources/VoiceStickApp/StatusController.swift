@@ -10,20 +10,22 @@ final class StatusController {
 
         init(text: String) {
             let normalized = text.lowercased()
-            if normalized.contains("pair") {
+            if normalized.contains("pair") || normalized.contains("配对") {
                 self = .needsPairing
-            } else if normalized.contains("listen") {
+            } else if normalized.contains("listen") || normalized.contains("录音") {
                 self = .listening
-            } else if normalized.contains("error") || normalized.contains("failed") {
+            } else if normalized.contains("error") || normalized.contains("failed") || normalized.contains("错误") || normalized.contains("失败") {
                 self = .error
-            } else if normalized.contains("process") || normalized.contains("final") || normalized.contains("transcrib") {
+            } else if normalized.contains("process") || normalized.contains("final") || normalized.contains("transcrib") || normalized.contains("处理") {
                 self = .processing
             } else if normalized.contains("ready") ||
                         normalized.contains("connect") ||
                         normalized.contains("scan") ||
                         normalized.contains("match") ||
                         normalized.contains("pause") ||
-                        normalized.contains("no speech") {
+                        normalized.contains("no speech") ||
+                        normalized.contains("准备") ||
+                        normalized.contains("未检测") {
                 self = .ready
             } else {
                 self = .processing
@@ -51,26 +53,26 @@ final class StatusController {
         var accessibilityDescription: String {
             switch self {
             case .needsPairing:
-                return "Pair VoiceStick"
+                return "请配对 VoiceStick"
             case .listening:
-                return "Listening"
+                return "正在录音"
             case .processing:
-                return "Processing"
+                return "正在处理"
             case .ready:
-                return "Ready"
+                return "准备就绪"
             case .error:
-                return "Error"
+                return "发生错误"
             }
         }
 
         var visibleTitle: String? {
             switch self {
             case .needsPairing:
-                return "Pair"
+                return "配对"
             case .processing:
-                return "Processing"
+                return "处理中"
             case .error:
-                return "Error"
+                return "错误"
             case .listening, .ready:
                 return nil
             }
@@ -92,11 +94,10 @@ final class StatusController {
     var onRestoreLastInput: (() -> Bool)?
     var onSetInteractionMode: ((InteractionMode) -> Void)?
     var onSetAutoEnter: ((Bool) -> Void)?
+    var onSetSideEnter: ((Bool) -> Void)?
+    var onSetPrimaryEnter: ((Bool) -> Void)?
     var onSetDefaultOutputProfile: ((OutputProfile) -> Void)?
     var onSetDeviceOutputProfile: ((String, OutputProfile) -> Void)?
-    var onCheckForUpdates: (() -> Void)? {
-        didSet { rebuildMenu() }
-    }
     private var needsPairing: Bool
     private var hasRecoverableInput = false
     private var pairedDeviceIDs: [String]
@@ -106,6 +107,8 @@ final class StatusController {
     private var firmwareInfoByDeviceID: [String: DeviceFirmwareInfo] = [:]
     private var interactionMode: InteractionMode
     private var autoEnter: Bool
+    private var sideEnter: Bool
+    private var primaryEnter: Bool
     private var defaultOutputProfile: OutputProfile
     private var deviceOutputProfiles: [String: OutputProfile]
 
@@ -114,6 +117,8 @@ final class StatusController {
          deviceOverlayPositions: [String: OverlayPosition] = [:],
          interactionMode: InteractionMode = .holdToTalk,
          autoEnter: Bool = true,
+         sideEnter: Bool = false,
+         primaryEnter: Bool = false,
          defaultOutputProfile: OutputProfile = .default,
          deviceOutputProfiles: [String: OutputProfile] = [:]) {
         self.pairedDeviceIDs = pairedDeviceIDs
@@ -121,6 +126,8 @@ final class StatusController {
         self.deviceOverlayPositions = deviceOverlayPositions
         self.interactionMode = interactionMode
         self.autoEnter = autoEnter
+        self.sideEnter = autoEnter ? false : sideEnter
+        self.primaryEnter = autoEnter || sideEnter ? false : primaryEnter
         self.defaultOutputProfile = defaultOutputProfile
         self.deviceOutputProfiles = deviceOutputProfiles
         self.needsPairing = pairedDeviceIDs.isEmpty
@@ -166,10 +173,17 @@ final class StatusController {
         rebuildMenu()
     }
 
-    func setInputOptions(interactionMode: InteractionMode, autoEnter: Bool) {
-        guard self.interactionMode != interactionMode || self.autoEnter != autoEnter else { return }
+    func setInputOptions(interactionMode: InteractionMode, autoEnter: Bool, sideEnter: Bool, primaryEnter: Bool) {
+        let normalizedSideEnter = autoEnter ? false : sideEnter
+        let normalizedPrimaryEnter = autoEnter || normalizedSideEnter || interactionMode == .clickToTalk ? false : primaryEnter
+        guard self.interactionMode != interactionMode ||
+                self.autoEnter != autoEnter ||
+                self.sideEnter != normalizedSideEnter ||
+                self.primaryEnter != normalizedPrimaryEnter else { return }
         self.interactionMode = interactionMode
         self.autoEnter = autoEnter
+        self.sideEnter = normalizedSideEnter
+        self.primaryEnter = normalizedPrimaryEnter
         rebuildMenu()
     }
 
@@ -188,7 +202,7 @@ final class StatusController {
         menu.removeAllItems()
         if hasRecoverableInput {
             menu.addItem(makeMenuItem(
-                title: "Restore Last Input",
+                title: "恢复最近一次输入",
                 symbolName: "arrow.uturn.backward",
                 action: #selector(restoreLastInput)
             ))
@@ -200,36 +214,26 @@ final class StatusController {
         addInputItems()
 
         menu.addItem(makeMenuItem(
-            title: "Pair Device...",
+            title: "配对设备…",
             symbolName: "dot.radiowaves.left.and.right",
             action: #selector(pairDevice)
         ))
 
         menu.addItem(makeMenuItem(
-            title: "Settings...",
+            title: "设置…",
             symbolName: "gearshape",
             action: #selector(openSettings),
             keyEquivalent: ","
         ))
 
-        menu.addItem(NSMenuItem.separator())
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
+        let versionItem = NSMenuItem(title: "当前版本：\(version)", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        versionItem.image = Self.symbolImage(named: "info.circle", accessibilityDescription: versionItem.title)
+        menu.addItem(versionItem)
 
         menu.addItem(makeMenuItem(
-            title: "Website",
-            symbolName: "safari",
-            action: #selector(openWebsite)
-        ))
-
-        if onCheckForUpdates != nil {
-            menu.addItem(makeMenuItem(
-                title: "Check for App Updates...",
-                symbolName: "arrow.triangle.2.circlepath",
-                action: #selector(checkForUpdates)
-            ))
-        }
-
-        menu.addItem(makeMenuItem(
-            title: "Quit",
+            title: "退出 VoiceStick",
             symbolName: "power",
             action: #selector(quitApp),
             keyEquivalent: "q"
@@ -242,15 +246,31 @@ final class StatusController {
         addOutputItems()
 
         let afterPasteItem = makeMenuItem(
-            title: "Press Return After Paste",
+            title: "粘贴后按回车",
             symbolName: "return",
             action: #selector(toggleAutoEnter)
         )
         afterPasteItem.state = autoEnter ? .on : .off
         menu.addItem(afterPasteItem)
 
+        let sideEnterItem = makeMenuItem(
+            title: "侧键点击发送",
+            symbolName: "rectangle.portrait.and.arrow.right",
+            action: #selector(toggleSideEnter)
+        )
+        sideEnterItem.state = sideEnter ? .on : .off
+        menu.addItem(sideEnterItem)
+
+        let primaryEnterItem = makeMenuItem(
+            title: "前键点击发送",
+            symbolName: "hand.tap",
+            action: #selector(togglePrimaryEnter)
+        )
+        primaryEnterItem.state = primaryEnter ? .on : .off
+        menu.addItem(primaryEnterItem)
+
         let interactionItem = makeMenuItem(
-            title: "Interaction",
+            title: "交互方式",
             symbolName: "hand.tap",
             action: nil
         )
@@ -280,7 +300,7 @@ final class StatusController {
 
     private func addOutputItems() {
         let outputItem = makeMenuItem(
-            title: "Output",
+            title: "输出位置",
             symbolName: "text.bubble",
             action: nil
         )
@@ -314,7 +334,7 @@ final class StatusController {
             )
             let submenu = NSMenu()
             let stateItem = NSMenuItem(
-                title: connectedDevice == nil ? "Scanning" : "Connected",
+                title: connectedDevice == nil ? "正在扫描" : "已连接",
                 action: nil,
                 keyEquivalent: ""
             )
@@ -334,7 +354,7 @@ final class StatusController {
             addFirmwareItems(to: submenu, deviceID: deviceID, isConnected: connectedDevice != nil)
 
             let forgetItem = makeMenuItem(
-                title: "Forget This Device",
+                title: "忽略此设备",
                 symbolName: "xmark.circle",
                 action: #selector(forgetConnectedDevice)
             )
@@ -350,7 +370,7 @@ final class StatusController {
     private func addThemeColorItems(to submenu: NSMenu, deviceID: String) {
         let currentColor = deviceThemeColors[deviceID] ?? .white
         let themeItem = makeMenuItem(
-            title: "Theme Color",
+            title: "主题颜色",
             symbolName: "paintpalette",
             action: nil
         )
@@ -373,7 +393,7 @@ final class StatusController {
     private func addOverlayPositionItems(to submenu: NSMenu, deviceID: String) {
         let currentPosition = deviceOverlayPositions[deviceID] ?? .center
         let positionItem = makeMenuItem(
-            title: "Overlay Position",
+            title: "字幕位置",
             symbolName: "rectangle.inset.filled",
             action: nil
         )
@@ -396,13 +416,13 @@ final class StatusController {
     private func addDeviceTextItems(to submenu: NSMenu, deviceID: String) {
         let profile = outputProfile(for: deviceID)
         let textItem = makeMenuItem(
-            title: "Translation",
+            title: "文本转换",
             symbolName: "textformat",
             action: nil
         )
         let textSubmenu = NSMenu()
         let originalItem = NSMenuItem(
-            title: "Original",
+            title: "原文",
             action: #selector(selectDeviceTextMode),
             keyEquivalent: ""
         )
@@ -414,7 +434,7 @@ final class StatusController {
 
         for language in Self.translationTargets {
             let item = NSMenuItem(
-                title: "Translate to \(language.name)",
+                title: "翻译为\(language.name)",
                 action: #selector(selectDeviceTextMode),
                 keyEquivalent: ""
             )
@@ -429,32 +449,32 @@ final class StatusController {
 
     private func addFirmwareItems(to submenu: NSMenu, deviceID: String, isConnected: Bool) {
         let info = firmwareInfoByDeviceID[deviceID]
-        let currentTitle = info?.currentVersion.map { "Firmware \($0)" } ?? "Firmware Unknown"
+        let currentTitle = info?.currentVersion.map { "固件版本 \($0)" } ?? "固件版本未知"
         let currentItem = NSMenuItem(title: currentTitle, action: nil, keyEquivalent: "")
         currentItem.isEnabled = false
         currentItem.image = Self.symbolImage(named: "info.circle", accessibilityDescription: currentTitle)
         submenu.addItem(currentItem)
 
         if info?.isChecking == true {
-            let checkingItem = NSMenuItem(title: "Checking for Updates", action: nil, keyEquivalent: "")
+            let checkingItem = NSMenuItem(title: "正在检查固件更新", action: nil, keyEquivalent: "")
             checkingItem.isEnabled = false
-            checkingItem.image = Self.symbolImage(named: "arrow.triangle.2.circlepath", accessibilityDescription: "Checking")
+            checkingItem.image = Self.symbolImage(named: "arrow.triangle.2.circlepath", accessibilityDescription: "正在检查")
             submenu.addItem(checkingItem)
             return
         }
 
         if let errorMessage = info?.errorMessage {
-            let errorItem = NSMenuItem(title: "Update Check Failed", action: nil, keyEquivalent: "")
+            let errorItem = NSMenuItem(title: "固件更新检查失败", action: nil, keyEquivalent: "")
             errorItem.toolTip = errorMessage
             errorItem.isEnabled = false
-            errorItem.image = Self.symbolImage(named: "exclamationmark.triangle", accessibilityDescription: "Update Check Failed")
+            errorItem.image = Self.symbolImage(named: "exclamationmark.triangle", accessibilityDescription: "固件更新检查失败")
             submenu.addItem(errorItem)
             return
         }
 
         if info?.updateAvailable == true, let latestVersion = info?.latestVersion {
             let updateItem = makeMenuItem(
-                title: "Update to \(latestVersion)...",
+                title: "更新到 \(latestVersion)…",
                 symbolName: "square.and.arrow.down",
                 action: #selector(updateFirmwareForDevice)
             )
@@ -462,9 +482,9 @@ final class StatusController {
             updateItem.isEnabled = isConnected
             submenu.addItem(updateItem)
         } else if info?.latestVersion != nil && info?.currentVersion != nil {
-            let upToDateItem = NSMenuItem(title: "Firmware Up to Date", action: nil, keyEquivalent: "")
+            let upToDateItem = NSMenuItem(title: "固件已是最新", action: nil, keyEquivalent: "")
             upToDateItem.isEnabled = false
-            upToDateItem.image = Self.symbolImage(named: "checkmark.circle", accessibilityDescription: "Firmware Up to Date")
+            upToDateItem.image = Self.symbolImage(named: "checkmark.circle", accessibilityDescription: "固件已是最新")
             submenu.addItem(upToDateItem)
         }
     }
@@ -476,7 +496,7 @@ final class StatusController {
     }
 
     func showListening(deviceID: String? = nil) {
-        setStatus("Listening")
+        setStatus("正在录音")
         let overlay = overlay(for: deviceID)
         markOverlayVisible(for: deviceID)
         applyOverlayStyle(for: deviceID, overlay: overlay)
@@ -484,7 +504,7 @@ final class StatusController {
     }
 
     func showPartial(_ text: String, deviceID: String? = nil) {
-        setStatus(text.isEmpty ? "Listening" : text)
+        setStatus(text.isEmpty ? "正在录音" : text)
         let overlay = overlay(for: deviceID)
         markOverlayVisible(for: deviceID)
         applyOverlayStyle(for: deviceID, overlay: overlay)
@@ -492,7 +512,7 @@ final class StatusController {
     }
 
     func showFinal(_ text: String, deviceID: String? = nil, onHidden: (() -> Void)? = nil) {
-        setStatus(text.isEmpty ? "No speech" : "Ready")
+        setStatus(text.isEmpty ? "未检测到语音" : "准备就绪")
         let overlay = overlay(for: deviceID)
         markOverlayVisible(for: deviceID)
         applyOverlayStyle(for: deviceID, overlay: overlay)
@@ -510,7 +530,7 @@ final class StatusController {
     }
 
     func showError(_ text: String, deviceID: String? = nil, onHidden: (() -> Void)? = nil) {
-        setStatus("ASR error: \(text)")
+        setStatus("语音识别错误：\(text)")
         let overlay = overlay(for: deviceID)
         markOverlayVisible(for: deviceID)
         applyOverlayStyle(for: deviceID, overlay: overlay)
@@ -557,8 +577,8 @@ final class StatusController {
         )
         button.title = status.visibleTitle ?? ""
         button.imagePosition = status.visibleTitle == nil ? .imageOnly : .imageLeading
-        button.toolTip = "VoiceStick: \(status.accessibilityDescription)"
-        button.setAccessibilityLabel("VoiceStick: \(status.accessibilityDescription)")
+        button.toolTip = "VoiceStick：\(status.accessibilityDescription)"
+        button.setAccessibilityLabel("VoiceStick：\(status.accessibilityDescription)")
     }
 
     private func makeMenuItem(
@@ -583,26 +603,26 @@ final class StatusController {
     }
 
     private static let translationTargets: [(code: String, name: String)] = [
-        ("en", "English"),
-        ("zh-Hans", "Chinese (Simplified)"),
-        ("zh-Hant", "Chinese (Traditional)"),
-        ("ja", "Japanese"),
-        ("ko", "Korean"),
-        ("ru", "Russian"),
-        ("fr", "French"),
-        ("de", "German"),
-        ("es", "Spanish"),
-        ("it", "Italian"),
-        ("pt", "Portuguese"),
-        ("nl", "Dutch"),
-        ("sv", "Swedish"),
-        ("pl", "Polish"),
-        ("tr", "Turkish"),
-        ("ar", "Arabic"),
-        ("hi", "Hindi"),
-        ("id", "Indonesian"),
-        ("vi", "Vietnamese"),
-        ("th", "Thai")
+        ("en", "英语"),
+        ("zh-Hans", "简体中文"),
+        ("zh-Hant", "繁体中文"),
+        ("ja", "日语"),
+        ("ko", "韩语"),
+        ("ru", "俄语"),
+        ("fr", "法语"),
+        ("de", "德语"),
+        ("es", "西班牙语"),
+        ("it", "意大利语"),
+        ("pt", "葡萄牙语"),
+        ("nl", "荷兰语"),
+        ("sv", "瑞典语"),
+        ("pl", "波兰语"),
+        ("tr", "土耳其语"),
+        ("ar", "阿拉伯语"),
+        ("hi", "印地语"),
+        ("id", "印度尼西亚语"),
+        ("vi", "越南语"),
+        ("th", "泰语")
     ]
 
     private func themeColor(for deviceID: String?) -> OverlayThemeColor {
@@ -759,14 +779,42 @@ final class StatusController {
             let mode = InteractionMode(rawValue: rawValue)
         else { return }
         interactionMode = mode
+        if mode == .clickToTalk {
+            primaryEnter = false
+        }
         rebuildMenu()
         onSetInteractionMode?(mode)
     }
 
     @objc private func toggleAutoEnter() {
         autoEnter.toggle()
+        if autoEnter {
+            sideEnter = false
+            primaryEnter = false
+        }
         rebuildMenu()
         onSetAutoEnter?(autoEnter)
+    }
+
+    @objc private func toggleSideEnter() {
+        sideEnter.toggle()
+        if sideEnter {
+            autoEnter = false
+            primaryEnter = false
+        }
+        rebuildMenu()
+        onSetSideEnter?(sideEnter)
+    }
+
+    @objc private func togglePrimaryEnter() {
+        primaryEnter.toggle()
+        if primaryEnter {
+            autoEnter = false
+            sideEnter = false
+            interactionMode = .holdToTalk
+        }
+        rebuildMenu()
+        onSetPrimaryEnter?(primaryEnter)
     }
 
     @objc private func selectOutputTarget(_ sender: NSMenuItem) {
@@ -777,14 +825,6 @@ final class StatusController {
         defaultOutputProfile.target = target
         rebuildMenu()
         onSetDefaultOutputProfile?(defaultOutputProfile)
-    }
-
-    @objc private func checkForUpdates() {
-        onCheckForUpdates?()
-    }
-
-    @objc private func openWebsite() {
-        NSWorkspace.shared.open(AppConfig.websiteURL)
     }
 
     @objc private func quitApp() {

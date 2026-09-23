@@ -81,6 +81,22 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$APP_DIR/Conte
 
 ARM_BUILD="$DESKTOP_DIR/.build-arm64/arm64-apple-macosx/$SWIFT_CONFIG"
 X86_BUILD="$DESKTOP_DIR/.build-x86_64/x86_64-apple-macosx/$SWIFT_CONFIG"
+if [ "$SWIFT_CONFIG" = "release" ]; then
+    PRODUCT_CONFIG="Release"
+else
+    PRODUCT_CONFIG="Debug"
+fi
+if [ ! -f "$ARM_BUILD/VoiceStickApp" ]; then
+    ARM_BUILD="$DESKTOP_DIR/.build-arm64/out/Products/$PRODUCT_CONFIG"
+fi
+if [ ! -f "$X86_BUILD/VoiceStickApp" ]; then
+    X86_BUILD="$DESKTOP_DIR/.build-x86_64/out/Products/$PRODUCT_CONFIG"
+fi
+
+if [ ! -f "$ARM_BUILD/VoiceStickApp" ] || [ ! -f "$X86_BUILD/VoiceStickApp" ]; then
+    echo "Error: universal build outputs were not found."
+    exit 1
+fi
 
 echo ""
 echo "Creating universal executable..."
@@ -98,7 +114,10 @@ else
     echo "WARNING: App icon was not found: $ICON_PATH"
 fi
 
-SPARKLE_FRAMEWORK="$(find -L "$DESKTOP_DIR/.build-arm64/artifacts" -name Sparkle.framework -type d 2>/dev/null | head -1 || true)"
+SPARKLE_FRAMEWORK="$ARM_BUILD/Sparkle.framework"
+if [ ! -d "$SPARKLE_FRAMEWORK" ]; then
+    SPARKLE_FRAMEWORK="$(find -L "$DESKTOP_DIR/.build-arm64/artifacts" -name Sparkle.framework -type d 2>/dev/null | head -1 || true)"
+fi
 if [ -n "$SPARKLE_FRAMEWORK" ]; then
     cp -R "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/"
     install_name_tool -add_rpath "@loader_path/../Frameworks" "$APP_DIR/Contents/MacOS/VoiceStickApp" 2>/dev/null || true
@@ -116,10 +135,15 @@ echo "Signing app..."
 xattr -cr "$APP_DIR" 2>/dev/null || true
 if [ "$CODESIGN_IDENTITY" != "-" ]; then
     echo "Using: $CODESIGN_IDENTITY"
-    codesign --deep --force --options runtime --sign "$CODESIGN_IDENTITY" "$APP_DIR"
+    if [ -d "$APP_DIR/Contents/Frameworks/Sparkle.framework" ]; then
+        codesign --deep --force --options runtime --sign "$CODESIGN_IDENTITY" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
+    fi
+    codesign --force --options runtime --sign "$CODESIGN_IDENTITY" "$APP_DIR/Contents/MacOS/VoiceStickApp"
+    codesign --force --options runtime --sign "$CODESIGN_IDENTITY" "$APP_DIR"
 else
     echo "Using ad-hoc signature."
-    codesign --deep --force --options runtime --sign - "$APP_DIR"
+    codesign --force --sign - "$APP_DIR/Contents/MacOS/VoiceStickApp"
+    codesign --force --sign - "$APP_DIR"
 fi
 
 echo "Verifying app signature..."

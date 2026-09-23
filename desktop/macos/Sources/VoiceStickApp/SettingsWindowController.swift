@@ -287,6 +287,8 @@ final class SettingsWindowController: NSWindowController {
             defaultOutputProfile: config.defaultOutputProfile,
             deviceOutputProfiles: config.deviceOutputProfiles,
             autoEnter: config.autoEnter,
+            sideEnter: config.sideEnter,
+            primaryEnter: config.primaryEnter,
             debugAudioCache: debugAudioButton.state == .on,
             debugAudioDirectory: URL(fileURLWithPath: debugAudioDirectoryField.stringValue, isDirectory: true)
         )
