@@ -145,6 +145,7 @@ final class VoiceStickCoordinator {
     private var mainInputState = MainInputState.ready
     private var receivedAudioFrames = 0
     private var hasLoggedFirstAudioFrame = false
+    private var previousAudioFrameSequence: UInt32?
     private var bufferedOggChunks: [Data] = []
     private var asrStarted = false
     private var sentFinalAudioChunk = false
@@ -156,7 +157,7 @@ final class VoiceStickCoordinator {
     // Physical button-up events can arrive noticeably after a human's click.
     // Keep this comfortably above an ordinary click so a submit never flashes
     // the recording UI, while a deliberate hold still begins push-to-talk.
-    private let primaryReturnTapDuration: TimeInterval = 0.65
+    private let primaryReturnTapDuration: TimeInterval = 0.48
     private var primaryReturnCandidatePeripheralID: UUID?
     private var primaryReturnCandidateSessionID: UInt32?
     private var primaryReturnCandidateStartedAt: Date?
@@ -204,10 +205,11 @@ final class VoiceStickCoordinator {
             self.cancelActiveCycleIfDeviceDisconnected()
             self.refreshFirmwareAvailability()
             if !connectedDevices.isEmpty {
-                self.statusController.setStatus("Ready")
+                self.statusController.setStatus("Preparing…")
                 self.ble.sendInteractionMode(self.config.interactionMode)
+                self.asr.prewarm()
             } else {
-                self.statusController.setStatus(self.pairedDeviceIDs.isEmpty ? "Pair a VoiceStick" : "Ready")
+                self.statusController.setStatus(self.pairedDeviceIDs.isEmpty ? "请配对 VoiceStick" : "正在搜索 VoiceStick")
             }
         }
 
@@ -264,6 +266,10 @@ final class VoiceStickCoordinator {
         asr = ASRWebSocketClient(config: config)
         translator = LLMTranslationClient(config: config)
         configureASRCallbacks()
+
+        if pairedDeviceIDs.contains(where: { self.ble.isConnected(deviceID: $0) }) {
+            asr.prewarm()
+        }
 
         if pairedDeviceIDs != config.pairedDeviceIDs {
             updatePairedDeviceIDs(config.pairedDeviceIDs)
@@ -428,6 +434,14 @@ final class VoiceStickCoordinator {
                 NSLog("Connected VoiceStick hardware=\(hardware) firmware=\(firmwareVersion)")
             }
             updateDeviceFirmwareInfo(event: event, peripheralID: peripheralID)
+            let reportedDeviceID = deviceID(for: peripheralID) ?? "unknown"
+            let reportedFirmwareVersion = event.firmwareVersion ?? "missing"
+            DiagnosticLog.write(
+                "ble_device_info device=\(reportedDeviceID) firmware=\(reportedFirmwareVersion)"
+            )
+        case "transport_ready":
+            statusController.setStatus("Ready")
+            DiagnosticLog.write("ble_transport_ready device=\(deviceID(for: peripheralID) ?? "unknown")")
         case "button_down":
             handleButtonDown(event, peripheralID: peripheralID)
         case "button_up":
@@ -625,6 +639,7 @@ final class VoiceStickCoordinator {
         mainInputState = .recording(sessionID: sessionID, peripheralID: peripheralID, startedAt: startedAt)
         receivedAudioFrames = 0
         hasLoggedFirstAudioFrame = false
+        previousAudioFrameSequence = nil
         bufferedOggChunks.removeAll(keepingCapacity: true)
         asrStarted = false
         sentFinalAudioChunk = false
@@ -709,10 +724,19 @@ final class VoiceStickCoordinator {
 
         guard !frame.payload.isEmpty else { return }
         scheduleAudioFrameInactivityTimeout(sessionID: frame.sessionID, peripheralID: peripheralID)
+        if let previousAudioFrameSequence,
+           frame.seq > previousAudioFrameSequence + 1 {
+            DiagnosticLog.write("audio_frame_gap device=\(deviceID(for: peripheralID) ?? "unknown") session=\(frame.sessionID) expected_seq=\(previousAudioFrameSequence + 1) actual_seq=\(frame.seq)")
+        }
+        previousAudioFrameSequence = frame.seq
         receivedAudioFrames += 1
         if !hasLoggedFirstAudioFrame {
             hasLoggedFirstAudioFrame = true
             DiagnosticLog.write("audio_first_frame_received device=\(deviceID(for: peripheralID) ?? "unknown") session=\(frame.sessionID)")
+            statusController.showListening(deviceID: deviceID(for: peripheralID))
+        }
+        if receivedAudioFrames % 10 == 0 {
+            DiagnosticLog.write("audio_frame_progress device=\(deviceID(for: peripheralID) ?? "unknown") session=\(frame.sessionID) seq=\(frame.seq) frames=\(receivedAudioFrames) elapsed_ms=\(Int(currentRecordingDuration * 1_000))")
         }
         let oggChunk = oggMuxer.append(opusPayload: frame.payload, isLast: frame.isEnd)
         debugAudioRecorder.append(oggChunk)

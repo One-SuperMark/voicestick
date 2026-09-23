@@ -70,7 +70,7 @@ final class StatusController {
             case .needsPairing:
                 return "配对"
             case .processing:
-                return "处理中"
+                return "Processing"
             case .error:
                 return "错误"
             case .listening, .ready:
@@ -456,7 +456,14 @@ final class StatusController {
 
     private func addFirmwareItems(to submenu: NSMenu, deviceID: String, isConnected: Bool) {
         let info = firmwareInfoByDeviceID[deviceID]
-        let currentTitle = info?.currentVersion.map { "固件版本 \($0)" } ?? "固件版本未知"
+        let currentTitle: String
+        if let version = info?.currentVersion {
+            currentTitle = "固件版本 \(version)"
+        } else if isConnected {
+            currentTitle = "正在读取固件版本"
+        } else {
+            currentTitle = "固件版本暂不可用"
+        }
         let currentItem = NSMenuItem(title: currentTitle, action: nil, keyEquivalent: "")
         currentItem.isEnabled = false
         currentItem.image = Self.symbolImage(named: "info.circle", accessibilityDescription: currentTitle)

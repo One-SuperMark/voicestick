@@ -96,6 +96,7 @@ typedef enum {
     APP_EVENT_UI_STATE,
     APP_EVENT_BLE_CONNECTED,
     APP_EVENT_BLE_DISCONNECTED,
+    APP_EVENT_BLE_TRANSPORT_READY,
     APP_EVENT_POWER_IRQ,
     APP_EVENT_BATTERY_REFRESH,
     APP_EVENT_ENTER_DEEP_SLEEP,
@@ -336,19 +337,35 @@ static void enter_deep_sleep(void)
 
 static bool app_ui_allows_recording_start(void)
 {
-    return s_app_ui_state != APP_UI_STATE_PENDING_CONFIRMATION;
+    return s_app_ui_state != APP_UI_STATE_PENDING_CONFIRMATION
+        && voice_ble_is_fast_interval_ready();
 }
 
 static uint32_t start_recording(void)
 {
     const bool ble_ready = voice_ble_is_ready();
+    const bool fast_transport_ready = voice_ble_is_fast_interval_ready();
     const bool ota_active = voice_ble_ota_is_active();
     const bool ui_allows_start = app_ui_allows_recording_start();
     if (s_recording || s_ota_updating || ota_active || !ble_ready || !ui_allows_start) {
         ESP_LOGW(TAG,
-                 "start recording denied: recording=%d ota=%d ble_ota=%d ble_ready=%d ui_state=%d",
-                 s_recording, s_ota_updating, ota_active, ble_ready, s_app_ui_state);
+                 "start recording denied: recording=%d ota=%d ble_ota=%d ble_ready=%d fast=%d ui_state=%d",
+                 s_recording, s_ota_updating, ota_active, ble_ready, fast_transport_ready, s_app_ui_state);
+        if (ble_ready && !fast_transport_ready) {
+            ui_status_set_idle_hint("Preparing...");
+            ui_status_set_idle();
+            (void)voice_ble_request_fast_interval();
+        }
         return 0;
+    }
+
+    /*
+     * Request the low-latency connection interval before opening I2S and
+     * before the first encoded frame is queued.  The audio pipeline requests
+     * it too, but doing it here gives BLE a head start after an idle period.
+     */
+    if (voice_ble_request_fast_interval() != ESP_OK) {
+        ESP_LOGW(TAG, "fast BLE interval request unavailable before recording");
     }
 
     const uint32_t session_id = s_session_id++;
@@ -481,6 +498,13 @@ static void ble_connection_cb(bool connected)
     queue_app_event(connected ? APP_EVENT_BLE_CONNECTED : APP_EVENT_BLE_DISCONNECTED);
 }
 
+static void ble_transport_ready_cb(bool ready)
+{
+    if (ready) {
+        queue_app_event(APP_EVENT_BLE_TRANSPORT_READY);
+    }
+}
+
 static void ble_control_cb(const char *json)
 {
     cJSON *root = cJSON_Parse(json);
@@ -537,7 +561,15 @@ static void apply_app_ui_state(const char *state, const char *text)
         s_app_ui_state = APP_UI_STATE_READY;
         ui_status_set_idle();
         note_activity();
-        voice_ble_request_slow_interval();
+        /*
+         * Keep the desktop-connected link responsive between utterances.
+         * Downgrading to 50–200ms plus slave latency here made the first
+         * seconds of the next recording arrive late while the fast update
+         * was still negotiating. Deep sleep remains the idle power boundary.
+         */
+        if (voice_ble_request_fast_interval() != ESP_OK) {
+            ESP_LOGW(TAG, "fast BLE interval request unavailable while ready");
+        }
     } else if (strcmp(state, "manual_send_pending") == 0) {
         /*
          * The macOS client is distinguishing a short front-button Return
@@ -681,6 +713,7 @@ static void app_event_task(void *arg)
             break;
         case APP_EVENT_BLE_CONNECTED:
             s_app_ui_state = APP_UI_STATE_READY;
+            ui_status_set_idle_hint("Preparing...");
             ui_status_set_idle();
             note_activity();
             break;
@@ -693,6 +726,17 @@ static void app_event_task(void *arg)
             release_recording_pm_locks();
             release_ota_pm_locks();
             ui_status_set_pairing(voice_ble_device_name());
+            break;
+        case APP_EVENT_BLE_TRANSPORT_READY:
+            if (!s_recording && !s_ota_updating && s_app_ui_state == APP_UI_STATE_READY) {
+                ui_status_set_idle_hint(s_interaction_mode == INTERACTION_MODE_CLICK_TO_TALK
+                                        ? "Click to Talk" : "Hold to Talk");
+                ui_status_set_idle();
+                if (audio_pipeline_play_ready_tone() != ESP_OK) {
+                    ESP_LOGW(TAG, "ready tone unavailable");
+                }
+                ESP_LOGI(TAG, "fast BLE transport ready; recording enabled");
+            }
             break;
         case APP_EVENT_POWER_IRQ:
             gpio_intr_enable(STICK_S3_PIN_PMIC_IRQ);
@@ -973,6 +1017,7 @@ void app_main(void)
     ESP_ERROR_CHECK(init_host_response_timer());
     note_activity();
     voice_ble_set_connection_callback(ble_connection_cb);
+    voice_ble_set_transport_ready_callback(ble_transport_ready_cb);
     voice_ble_set_control_callback(ble_control_cb);
     voice_ble_set_ota_callback(ble_ota_cb);
     ESP_ERROR_CHECK(init_buttons());

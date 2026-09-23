@@ -28,11 +28,21 @@ static const char *TAG = "audio_pipeline";
 #define OPUS_MAX_PACKET_SIZE 220
 #define OPUS_COMPLEXITY 1
 
-#define TX_QUEUE_DEPTH 50
-#define TX_RETRY_DELAY_MS 30
-#define TX_MAX_RETRIES 50
+/*
+ * Audio is interactive data: a late packet is less useful than a missing one.
+ * Keep only a short backlog and give a busy BLE controller a few quick retry
+ * attempts.  The former 50 x 30 ms policy could hold one packet for 1.5 s,
+ * turning a short recording into many seconds of stale audio after idle.
+ */
+#define TX_QUEUE_DEPTH 20
+#define TX_RETRY_DELAY_MS 15
+#define TX_MAX_RETRIES 4
 #define TX_DRAIN_TIMEOUT_MS 500
 #define TASK_EXIT_WAIT_MS 800
+#define READY_TONE_SAMPLE_RATE 16000
+#define READY_TONE_FREQUENCY_HZ 1400
+#define READY_TONE_DURATION_MS 70
+#define READY_TONE_VOLUME 38
 
 typedef struct {
     uint32_t session_id;
@@ -49,6 +59,7 @@ static uint32_t s_seq;
 static TaskHandle_t s_audio_task;
 static TaskHandle_t s_tx_task;
 static QueueHandle_t s_tx_queue;
+static atomic_bool s_tone_playing;
 
 /* Per-session resources: created on start, destroyed on stop */
 static i2s_chan_handle_t s_rx_handle;
@@ -238,6 +249,130 @@ static void deinit_session_resources(void)
     deinit_codec();
     deinit_i2s();
     ESP_LOGI(TAG, "session resources released");
+}
+
+static void ready_tone_task(void *arg)
+{
+    (void)arg;
+    i2s_chan_handle_t tx_handle = NULL;
+    esp_codec_dev_handle_t tone_codec = NULL;
+    const audio_codec_ctrl_if_t *ctrl_if = NULL;
+    const audio_codec_data_if_t *data_if = NULL;
+    const audio_codec_gpio_if_t *gpio_if = NULL;
+    const audio_codec_if_t *codec_if = NULL;
+
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+    chan_cfg.auto_clear = true;
+    if (i2s_new_channel(&chan_cfg, &tx_handle, NULL) != ESP_OK) {
+        ESP_LOGW(TAG, "ready tone skipped: create I2S TX failed");
+        goto done;
+    }
+
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(READY_TONE_SAMPLE_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
+                                                        I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = STICK_S3_PIN_ES8311_MCLK,
+            .bclk = STICK_S3_PIN_ES8311_BCLK,
+            .ws = STICK_S3_PIN_ES8311_LRCK,
+            .dout = STICK_S3_PIN_ES8311_DIN,
+            .din = STICK_S3_PIN_ES8311_DOUT,
+        },
+    };
+    std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    if (i2s_channel_init_std_mode(tx_handle, &std_cfg) != ESP_OK ||
+        i2s_channel_enable(tx_handle) != ESP_OK) {
+        ESP_LOGW(TAG, "ready tone skipped: initialise I2S TX failed");
+        goto done;
+    }
+
+    audio_codec_i2c_cfg_t i2c_cfg = {
+        .port = I2C_NUM_1,
+        .addr = ES8311_CODEC_DEFAULT_ADDR,
+        .bus_handle = stick_s3_board_i2c_bus(),
+    };
+    ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
+    audio_codec_i2s_cfg_t i2s_cfg = {
+        .port = I2S_NUM_1,
+        .rx_handle = NULL,
+        .tx_handle = tx_handle,
+    };
+    data_if = audio_codec_new_i2s_data(&i2s_cfg);
+    gpio_if = audio_codec_new_gpio();
+    es8311_codec_cfg_t es8311_cfg = {
+        .ctrl_if = ctrl_if,
+        .gpio_if = gpio_if,
+        .codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC,
+        .pa_pin = -1,
+        .master_mode = false,
+        .use_mclk = true,
+    };
+    if (!ctrl_if || !data_if || !gpio_if ||
+        !(codec_if = es8311_codec_new(&es8311_cfg))) {
+        ESP_LOGW(TAG, "ready tone skipped: initialise ES8311 failed");
+        goto done;
+    }
+
+    esp_codec_dev_cfg_t dev_cfg = {
+        .dev_type = ESP_CODEC_DEV_TYPE_OUT,
+        .codec_if = codec_if,
+        .data_if = data_if,
+    };
+    tone_codec = esp_codec_dev_new(&dev_cfg);
+    esp_codec_dev_sample_info_t sample_cfg = {
+        .bits_per_sample = I2S_DATA_BIT_WIDTH_16BIT,
+        .channel = 1,
+        .channel_mask = I2S_STD_SLOT_LEFT,
+        .sample_rate = READY_TONE_SAMPLE_RATE,
+        .mclk_multiple = 0,
+    };
+    if (!tone_codec || esp_codec_dev_open(tone_codec, &sample_cfg) != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TAG, "ready tone skipped: open ES8311 output failed");
+        goto done;
+    }
+    (void)esp_codec_dev_set_out_vol(tone_codec, READY_TONE_VOLUME);
+
+    int16_t samples[160];
+    const size_t total_samples = (READY_TONE_SAMPLE_RATE * READY_TONE_DURATION_MS) / 1000;
+    for (size_t offset = 0; offset < total_samples; offset += sizeof(samples) / sizeof(samples[0])) {
+        const size_t remaining = total_samples - offset;
+        const size_t count = remaining < (sizeof(samples) / sizeof(samples[0]))
+            ? remaining : (sizeof(samples) / sizeof(samples[0]));
+        for (size_t i = 0; i < count; ++i) {
+            const uint32_t phase = ((offset + i) * READY_TONE_FREQUENCY_HZ * 2) / READY_TONE_SAMPLE_RATE;
+            samples[i] = (phase & 1U) ? 3800 : -3800;
+        }
+        if (esp_codec_dev_write(tone_codec, samples, count * sizeof(samples[0])) != ESP_CODEC_DEV_OK) {
+            ESP_LOGW(TAG, "ready tone write failed");
+            break;
+        }
+    }
+    ESP_LOGI(TAG, "ready tone played");
+
+done:
+    if (tone_codec) {
+        esp_codec_dev_close(tone_codec);
+        esp_codec_dev_delete(tone_codec);
+    }
+    if (codec_if) {
+        audio_codec_delete_codec_if(codec_if);
+    }
+    if (data_if) {
+        audio_codec_delete_data_if(data_if);
+    }
+    if (gpio_if) {
+        audio_codec_delete_gpio_if(gpio_if);
+    }
+    if (ctrl_if) {
+        audio_codec_delete_ctrl_if(ctrl_if);
+    }
+    if (tx_handle) {
+        (void)i2s_channel_disable(tx_handle);
+        (void)i2s_del_channel(tx_handle);
+    }
+    atomic_store(&s_tone_playing, false);
+    vTaskDelete(NULL);
 }
 
 static void audio_task(void *arg)
@@ -471,6 +606,18 @@ esp_err_t audio_pipeline_stop(void)
         .len = 0,
     };
     xQueueSend(s_tx_queue, &sentinel, portMAX_DELAY);
+    return ESP_OK;
+}
+
+esp_err_t audio_pipeline_play_ready_tone(void)
+{
+    if (atomic_load(&s_running) || atomic_exchange(&s_tone_playing, true)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xTaskCreate(ready_tone_task, "ready_tone", 4096, NULL, 4, NULL) != pdPASS) {
+        atomic_store(&s_tone_playing, false);
+        return ESP_ERR_NO_MEM;
+    }
     return ESP_OK;
 }
 

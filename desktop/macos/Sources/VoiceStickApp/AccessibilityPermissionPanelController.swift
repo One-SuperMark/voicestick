@@ -6,7 +6,7 @@ final class AccessibilityPermissionPanelController: NSWindowController {
     init(appURL: URL = Bundle.main.bundleURL) {
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 310, height: 200),
-            styleMask: [.titled, .closable, .utilityWindow],
+            styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -63,8 +63,10 @@ final class AccessibilityPermissionPanelController: NSWindowController {
 
     func show() {
         window?.center()
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        // Keep System Settings as the active app while this small drag source
+        // floats above it. Activating VoiceStick here hides the permission page
+        // behind the user’s previous app on slower System Settings launches.
+        window?.orderFrontRegardless()
     }
 }
 

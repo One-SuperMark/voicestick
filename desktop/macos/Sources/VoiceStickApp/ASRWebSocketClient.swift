@@ -27,6 +27,9 @@ protocol ASRClient: AnyObject {
     var onUpgradeURL: ((URL, String) -> Void)? { get set }
 
     func start(options: ASRSessionOptions) -> Bool
+    /// Establishes the connection-level WebSocket handshake only. It never
+    /// opens an ASR session and never sends audio.
+    func prewarm()
     func sendOggOpusChunk(_ data: Data, isLast: Bool)
     func finish()
     func cancel()
@@ -111,6 +114,22 @@ final class ASRWebSocketClient: ASRClient {
     @discardableResult
     func start(options: ASRSessionOptions) -> Bool {
         startSession(options: options)
+    }
+
+    func prewarm() {
+        queue.async { [weak self] in
+            self?.beginPrewarm()
+        }
+    }
+
+    private func beginPrewarm() {
+        guard sessionState == .idle, connectionState == .disconnected else { return }
+        guard !providerAPIKey.isEmpty, URL(string: providerWebSocketURL) != nil else {
+            DiagnosticLog.write("asr_prewarm_skipped reason=missing_configuration")
+            return
+        }
+        DiagnosticLog.write("asr_prewarm_requested provider=\(config.asrProvider.rawValue)")
+        connectWebSocket()
     }
 
     private func startSession(options: ASRSessionOptions) -> Bool {
@@ -479,15 +498,28 @@ final class ASRWebSocketClient: ASRClient {
             DiagnosticLog.write("asr_socket_connected")
             if sessionState == .starting {
                 sendStartSession()
+            } else {
+                // This is a connection-only prewarm. Do not send start_session
+                // or any audio before the user actually begins recording.
+                DiagnosticLog.write("asr_prewarm_connected")
             }
 
         case .connectionFinished:
             connectionState = .disconnected
             webSocket = nil
             NSLog("ASR websocket connection_finished")
+            if sessionState == .idle {
+                DiagnosticLog.write("asr_prewarm_connection_closed")
+            }
 
         case .connectionFailed:
-            failSession(response.payloadText ?? "ASR connection failed")
+            if sessionState == .idle {
+                webSocket = nil
+                connectionState = .disconnected
+                DiagnosticLog.write("asr_prewarm_failed")
+            } else {
+                failSession(response.payloadText ?? "ASR connection failed")
+            }
 
         case .sessionStarted:
             guard response.sessionID == currentSessionID else { return }

@@ -33,6 +33,9 @@ static const char *TAG = "voice_ble";
 static bool s_connected;
 static bool s_audio_subscribed;
 static bool s_state_subscribed;
+/* `device_info` is larger than the default 23-byte ATT MTU.  Do not send it
+ * until the exchange requested at connection time has completed. */
+static bool s_mtu_ready;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t s_own_addr_type;
 static uint16_t s_audio_attr_handle;
@@ -41,6 +44,7 @@ static uint16_t s_ota_state_attr_handle;
 static char s_device_id[5] = "0000";
 static char s_device_name[8] = VOICE_BLE_DEVICE_NAME_PREFIX "-0000";
 static voice_ble_connection_cb_t s_connection_cb;
+static voice_ble_transport_ready_cb_t s_transport_ready_cb;
 static voice_ble_control_cb_t s_control_cb;
 static voice_ble_ota_cb_t s_ota_cb;
 
@@ -52,6 +56,7 @@ typedef enum {
 
 static conn_itvl_target_t s_itvl_target;
 static bool s_itvl_update_pending;
+static bool s_fast_interval_ready;
 
 typedef struct {
     bool active;
@@ -88,6 +93,26 @@ static void start_advertising(void);
 static void stop_advertising(void);
 static struct ble_npl_callout s_adv_retry_callout;
 #define ADV_RETRY_DELAY_MS 1000
+
+static int mtu_exchange_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
+                           uint16_t mtu, void *arg)
+{
+    (void)arg;
+    if (conn_handle != s_conn_handle || error->status != 0) {
+        ESP_LOGW(TAG, "MTU exchange failed conn=%u status=%d", conn_handle, error->status);
+        return 0;
+    }
+
+    s_mtu_ready = mtu > 23;
+    ESP_LOGI(TAG, "MTU exchange complete mtu=%u", mtu);
+    if (s_mtu_ready && s_state_subscribed) {
+        esp_err_t rc = voice_ble_send_device_info();
+        if (rc != ESP_OK) {
+            ESP_LOGW(TAG, "device_info send after MTU exchange failed err=0x%x", rc);
+        }
+    }
+    return 0;
+}
 
 static void adv_retry_callout_cb(struct ble_npl_event *ev)
 {
@@ -464,6 +489,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             s_connected = true;
             s_audio_subscribed = false;
             s_state_subscribed = false;
+            s_mtu_ready = false;
             s_conn_handle = event->connect.conn_handle;
             ESP_LOGI(TAG, "connected handle=%u", s_conn_handle);
             stop_advertising();
@@ -475,7 +501,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             // peer. Initiate the exchange from our side as a defensive
             // measure so the link is usable for both audio and state.
             {
-                int mtu_rc = ble_gattc_exchange_mtu(s_conn_handle, NULL, NULL);
+                int mtu_rc = ble_gattc_exchange_mtu(s_conn_handle, mtu_exchange_cb, NULL);
                 if (mtu_rc != 0 && mtu_rc != BLE_HS_EALREADY) {
                     ESP_LOGW(TAG, "mtu exchange request failed rc=%d", mtu_rc);
                 }
@@ -505,12 +531,17 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         s_connected = false;
         s_audio_subscribed = false;
         s_state_subscribed = false;
+        s_mtu_ready = false;
+        s_fast_interval_ready = false;
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_itvl_target = CONN_ITVL_NONE;
         s_itvl_update_pending = false;
         start_advertising();
         if (s_connection_cb) {
             s_connection_cb(false);
+        }
+        if (s_transport_ready_cb) {
+            s_transport_ready_cb(false);
         }
         return 0;
 
@@ -529,11 +560,17 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             s_audio_subscribed = event->subscribe.cur_notify;
         } else if (event->subscribe.attr_handle == s_state_attr_handle) {
             s_state_subscribed = event->subscribe.cur_notify;
-            if (s_state_subscribed) {
+            if (s_state_subscribed && s_mtu_ready) {
                 esp_err_t rc = voice_ble_send_device_info();
                 if (rc != ESP_OK) {
                     ESP_LOGW(TAG, "device_info send failed err=0x%x", rc);
                 }
+            }
+        }
+        if (voice_ble_is_ready()) {
+            /* Negotiate the low-latency interval before the first button press. */
+            if (voice_ble_request_fast_interval() != ESP_OK) {
+                ESP_LOGW(TAG, "fast conn interval request after subscribe failed");
             }
         }
         return 0;
@@ -543,8 +580,21 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         int find_rc = ble_gap_conn_find(event->conn_update.conn_handle, &desc);
         if (find_rc == 0) {
             ESP_LOGI(TAG, "conn updated: status=%d interval=%u latency=%u timeout=%u",
-                     event->conn_update.status,
-                     desc.conn_itvl, desc.conn_latency, desc.supervision_timeout);
+                    event->conn_update.status,
+                    desc.conn_itvl, desc.conn_latency, desc.supervision_timeout);
+            const bool fast_ready = event->conn_update.status == 0
+                && desc.conn_itvl >= 12 && desc.conn_itvl <= 24
+                && desc.conn_latency == 0;
+            if (fast_ready != s_fast_interval_ready) {
+                s_fast_interval_ready = fast_ready;
+                ESP_LOGI(TAG, "fast conn interval ready=%d", fast_ready);
+                if (s_transport_ready_cb) {
+                    s_transport_ready_cb(fast_ready);
+                }
+                if (fast_ready) {
+                    (void)voice_ble_send_transport_ready();
+                }
+            }
         } else {
             ESP_LOGI(TAG, "conn updated: status=%d (desc unavailable)",
                      event->conn_update.status);
@@ -727,6 +777,11 @@ void voice_ble_set_connection_callback(voice_ble_connection_cb_t callback)
     s_connection_cb = callback;
 }
 
+void voice_ble_set_transport_ready_callback(voice_ble_transport_ready_cb_t callback)
+{
+    s_transport_ready_cb = callback;
+}
+
 void voice_ble_set_control_callback(voice_ble_control_cb_t callback)
 {
     s_control_cb = callback;
@@ -745,6 +800,11 @@ bool voice_ble_is_connected(void)
 bool voice_ble_is_ready(void)
 {
     return s_connected && s_audio_subscribed && s_state_subscribed;
+}
+
+bool voice_ble_is_fast_interval_ready(void)
+{
+    return s_fast_interval_ready;
 }
 
 bool voice_ble_ota_is_active(void)
@@ -901,18 +961,22 @@ static esp_err_t send_state_json(const char *json)
     return ESP_OK;
 }
 
+esp_err_t voice_ble_send_transport_ready(void)
+{
+    return send_state_json("{\"event\":\"transport_ready\"}");
+}
+
 esp_err_t voice_ble_send_device_info(void)
 {
     const esp_app_desc_t *app_desc = esp_app_get_description();
     const char *version = app_desc ? app_desc->version : "unknown";
-    char json[320];
+    /* Keep this capability response intentionally small. The desktop needs
+     * the board and version here; the old optional capability arrays made the
+     * first notification fragile across central implementations. */
+    char json[112];
     snprintf(json, sizeof(json),
              "{\"event\":\"device_info\",\"hardware\":\"stick_s3\","
-             "\"firmware_version\":\"%s\","
-             "\"buttons\":[\"primary\",\"secondary\"],"
-             "\"interaction_modes\":[\"hold_to_talk\",\"click_to_talk\"],"
-             "\"ui_states\":[\"ready\",\"manual_send_pending\",\"recording\",\"thinking\","
-             "\"pending_confirmation\",\"error\"]}",
+             "\"firmware_version\":\"%s\"}",
              version);
     return send_state_json(json);
 }

@@ -204,6 +204,21 @@ final class OverlayController {
         }
     }
 
+    private func updateCursorAnimation(for text: String) {
+        guard text.hasSuffix("_") else {
+            textLabel.layer?.removeAnimation(forKey: "cursorPulse")
+            textLabel.alphaValue = 1
+            return
+        }
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1
+        pulse.toValue = 0.35
+        pulse.duration = 0.55
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        textLabel.layer?.add(pulse, forKey: "cursorPulse")
+    }
+
     private func reposition(for text: String) {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let visibleFrame = screen.visibleFrame

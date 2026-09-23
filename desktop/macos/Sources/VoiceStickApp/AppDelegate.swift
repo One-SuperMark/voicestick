@@ -58,11 +58,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 break
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             let controller = self?.accessibilityPermissionPanelController
                 ?? AccessibilityPermissionPanelController()
             self?.accessibilityPermissionPanelController = controller
             controller.show()
+            self?.activateSystemSettings(attempt: 0)
+        }
+    }
+
+    private func activateSystemSettings(attempt: Int) {
+        let identifiers = [
+            "com.apple.systempreferences",
+            "com.apple.SystemSettings"
+        ]
+        let systemSettings = identifiers
+            .flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0) }
+            .first
+
+        if let systemSettings {
+            systemSettings.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        }
+
+        // System Settings may still be launching when the URL scheme succeeds.
+        // Retry briefly so the permission page reliably becomes the front app.
+        guard attempt < 5 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.activateSystemSettings(attempt: attempt + 1)
         }
     }
 
@@ -153,7 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusController.onSetDeviceOverlayPosition = { [weak self] deviceID, position in
             self?.updateDeviceOverlayPosition(deviceID: deviceID, position: position)
         }
-        statusController.setStatus(config.pairedDeviceIDs.isEmpty ? "需要配对设备" : "准备就绪")
+        statusController.setStatus(config.pairedDeviceIDs.isEmpty ? "需要配对设备" : "正在搜索 VoiceStick")
         coordinator.start()
     }
 
