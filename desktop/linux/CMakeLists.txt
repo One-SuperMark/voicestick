@@ -2,7 +2,14 @@ cmake_minimum_required(VERSION 3.24)
 
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION" VOICESTICK_VERSION_STRING LIMIT_COUNT 1)
 string(STRIP "${VOICESTICK_VERSION_STRING}" VOICESTICK_VERSION_STRING)
-project(VoiceStickLinux VERSION ${VOICESTICK_VERSION_STRING} LANGUAGES C CXX)
+# CMake accepts at most four numeric components.  The optional fifth component
+# is VoiceStick's lettered debug-release sequence and remains available in the
+# raw version string used by the application and package names.
+string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?" VOICESTICK_CMAKE_VERSION "${VOICESTICK_VERSION_STRING}")
+if(NOT VOICESTICK_CMAKE_VERSION)
+    message(FATAL_ERROR "VERSION must start with major.minor.patch: ${VOICESTICK_VERSION_STRING}")
+endif()
+project(VoiceStickLinux VERSION ${VOICESTICK_CMAKE_VERSION} LANGUAGES C CXX)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION")
 
 set(CMAKE_CXX_STANDARD 20)

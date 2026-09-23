@@ -72,7 +72,7 @@ business actions such as "cancel" or "confirm"; the app owns that interpretation
 Currently emitted state events:
 
 ```json
-{"event":"device_info","hardware":"stick_s3","firmware_version":"0.2.2","buttons":["primary","secondary"],"interaction_modes":["hold_to_talk","click_to_talk"],"ui_states":["ready","recording","thinking","pending_confirmation","error"]}
+{"event":"device_info","hardware":"stick_s3","firmware_version":"0.2.2","buttons":["primary","secondary"],"interaction_modes":["hold_to_talk","click_to_talk"],"ui_states":["ready","manual_send_pending","recording","thinking","pending_confirmation","error"]}
 {"event":"button_down","button":"primary","session_id":1234}
 {"event":"button_up","button":"primary","duration_ms":620,"session_id":1234}
 {"event":"button_down","button":"secondary"}
@@ -100,6 +100,7 @@ Current desktop events:
 
 ```json
 {"event":"ui_state","state":"ready","text":""}
+{"event":"ui_state","state":"manual_send_pending","text":""}
 {"event":"ui_state","state":"recording","text":""}
 {"event":"ui_state","state":"thinking","text":"partial text"}
 {"event":"ui_state","state":"pending_confirmation","text":"final text"}
@@ -114,6 +115,12 @@ showing the recording cat when the primary button starts audio, but the app's
 `ui_state` is the authoritative display state. Current StickS3 firmware does not
 render recognition text on-device because the LVGL font set does not include
 Chinese glyphs; `text` is used only to choose fixed English hints.
+
+`manual_send_pending` is used only while the macOS client distinguishes an
+optional front-button Return tap from a hold-to-talk recording. It keeps the
+screen in its idle presentation without stopping the already-buffered local
+audio. If the press continues past the tap window, the client sends `recording`
+and the firmware restores the Listening screen.
 
 `interaction_mode` controls the front-button behavior and idle screen hint.
 `hold_to_talk` starts audio on primary down and stops on primary up.

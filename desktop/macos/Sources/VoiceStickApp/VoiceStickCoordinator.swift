@@ -156,6 +156,9 @@ final class VoiceStickCoordinator {
     private var primaryReturnCandidateStartedAt: Date?
     private var primaryReturnCandidateFrames: [AudioFrame] = []
     private var primaryReturnStartWorkItem: DispatchWorkItem?
+    // A BLE button-up can arrive after the local hold timer. Keep the
+    // candidate until that event supplies the firmware-measured duration.
+    private var primaryReturnDeferredToRecording = false
     private var waitingForAudioEnd = false
     private var audioEndTimeoutTimer: Timer?
     private var pendingPasteState = PendingPasteState.idle
@@ -430,6 +433,7 @@ final class VoiceStickCoordinator {
 
     private func handleButtonDown(_ event: StateEvent, peripheralID: UUID) {
         NSLog("Button down button=\(event.button ?? "nil") dev=VS-\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil")")
+        DiagnosticLog.write("button_down button=\(event.button ?? "nil") device=\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil") pending_return=\(pendingPrimaryReturn) main_state=\(mainInputState.isBusy ? "busy" : "ready")")
         switch event.button {
         case "primary":
             handlePrimaryButtonDown(sessionID: event.sessionID, peripheralID: peripheralID)
@@ -442,6 +446,7 @@ final class VoiceStickCoordinator {
 
     private func handleButtonUp(_ event: StateEvent, peripheralID: UUID) {
         NSLog("Button up button=\(event.button ?? "nil") dev=VS-\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil") duration_ms=\(event.durationMs.map(String.init) ?? "nil")")
+        DiagnosticLog.write("button_up button=\(event.button ?? "nil") device=\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil") duration_ms=\(event.durationMs.map(String.init) ?? "nil") candidate=\(primaryReturnCandidatePeripheralID == peripheralID)")
         switch event.button {
         case "primary":
             handlePrimaryButtonUp(peripheralID: peripheralID, durationMs: event.durationMs)
@@ -454,6 +459,7 @@ final class VoiceStickCoordinator {
 
     private func handleButtonClick(_ event: StateEvent, peripheralID: UUID) {
         NSLog("Button click button=\(event.button ?? "nil") dev=VS-\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil") duration_ms=\(event.durationMs.map(String.init) ?? "nil")")
+        DiagnosticLog.write("button_click button=\(event.button ?? "nil") device=\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil") duration_ms=\(event.durationMs.map(String.init) ?? "nil") pending_return=\(pendingPrimaryReturn)")
         switch event.button {
         case "primary":
             // Some firmware revisions emit a click in addition to, or instead
@@ -466,6 +472,7 @@ final class VoiceStickCoordinator {
                 clearPrimaryReturnCandidate()
                 pendingPrimaryReturn = false
                 inputInjector.pressReturn()
+                ble.sendUIState("ready", to: peripheralID)
                 return
             }
             if handleFrontButtonDuringPendingPaste(peripheralID: peripheralID) {
@@ -552,6 +559,11 @@ final class VoiceStickCoordinator {
         primaryReturnCandidatePeripheralID = peripheralID
         primaryReturnCandidateSessionID = sessionID
         primaryReturnCandidateStartedAt = Date()
+        // The firmware begins its audio pipeline immediately on a physical
+        // press. Keep the display idle while this short window is still a
+        // possible Return gesture; a real hold switches it back to recording.
+        ble.sendUIState("manual_send_pending", to: peripheralID)
+        DiagnosticLog.write("front_send_candidate_start device=\(deviceID(for: peripheralID) ?? "unknown") session=\(sessionID.map(String.init) ?? "nil") threshold_ms=\(Int(primaryReturnTapDuration * 1_000))")
         let workItem = DispatchWorkItem { [weak self, peripheralID] in
             self?.startDeferredPrimaryRecording(peripheralID: peripheralID)
         }
@@ -566,14 +578,20 @@ final class VoiceStickCoordinator {
         primaryReturnCandidateSessionID = nil
         primaryReturnCandidateStartedAt = nil
         primaryReturnCandidateFrames.removeAll(keepingCapacity: true)
+        primaryReturnDeferredToRecording = false
     }
 
     private func startDeferredPrimaryRecording(peripheralID: UUID) {
-        guard primaryReturnCandidatePeripheralID == peripheralID else { return }
+        guard primaryReturnCandidatePeripheralID == peripheralID,
+              !primaryReturnDeferredToRecording
+        else { return }
         let sessionID = primaryReturnCandidateSessionID
         let startedAt = primaryReturnCandidateStartedAt
         let bufferedFrames = primaryReturnCandidateFrames
-        clearPrimaryReturnCandidate()
+        DiagnosticLog.write("front_recording_deferred_start device=\(deviceID(for: peripheralID) ?? "unknown") session=\(sessionID.map(String.init) ?? "nil") buffered_frames=\(bufferedFrames.count)")
+        primaryReturnStartWorkItem = nil
+        primaryReturnCandidateFrames.removeAll(keepingCapacity: true)
+        primaryReturnDeferredToRecording = true
         guard let sessionID, sessionID != 0, let startedAt else {
             pendingPrimaryReturn = false
             return
@@ -581,14 +599,20 @@ final class VoiceStickCoordinator {
         beginPrimaryRecording(
             sessionID: sessionID,
             peripheralID: peripheralID,
-            startedAt: startedAt
+            startedAt: startedAt,
+            preservePrimaryReturnCandidate: true
         )
         for frame in bufferedFrames {
             handleAudioFrame(frame, peripheralID: peripheralID)
         }
     }
 
-    private func beginPrimaryRecording(sessionID: UInt32, peripheralID: UUID, startedAt: Date = Date()) {
+    private func beginPrimaryRecording(
+        sessionID: UInt32,
+        peripheralID: UUID,
+        startedAt: Date = Date(),
+        preservePrimaryReturnCandidate: Bool = false
+    ) {
         mainInputState = .recording(sessionID: sessionID, peripheralID: peripheralID, startedAt: startedAt)
         receivedAudioFrames = 0
         bufferedOggChunks.removeAll(keepingCapacity: true)
@@ -596,13 +620,16 @@ final class VoiceStickCoordinator {
         sentFinalAudioChunk = false
         pastedFinalText = false
         pendingSecondaryReturn = false
-        pendingPrimaryReturn = false
+        if !preservePrimaryReturnCandidate {
+            pendingPrimaryReturn = false
+        }
         pendingPasteState = .idle
         isShowingASRError = false
         oggMuxer.reset()
         debugAudioRecorder.start(deviceID: deviceID(for: peripheralID), sessionID: sessionID)
         statusController.showListening(deviceID: deviceID(for: peripheralID))
         sendUIStateForActiveDevice("recording")
+        DiagnosticLog.write("recording_start device=\(deviceID(for: peripheralID) ?? "unknown") session=\(sessionID)")
     }
 
     private func handlePrimaryButtonUp(peripheralID: UUID, durationMs: UInt32? = nil) {
@@ -615,14 +642,25 @@ final class VoiceStickCoordinator {
             let duration = durationMs.map { TimeInterval($0) / 1_000 }
                 ?? Date().timeIntervalSince(startedAt)
             if duration < primaryReturnTapDuration {
+                let recordingAlreadyStarted = primaryReturnDeferredToRecording
                 clearPrimaryReturnCandidate()
                 pendingPrimaryReturn = false
+                if recordingAlreadyStarted {
+                    cancelShortRecording()
+                }
                 inputInjector.pressReturn()
+                ble.sendUIState("ready", to: peripheralID)
+                DiagnosticLog.write("front_send_return device=\(deviceID(for: peripheralID) ?? "unknown") duration_ms=\(Int(duration * 1_000)) source=button_up recording_started=\(recordingAlreadyStarted)")
                 return
             }
             // The event loop did not deliver the hold timer before button-up.
             // Start and finish the buffered recording without treating it as Return.
-            startDeferredPrimaryRecording(peripheralID: peripheralID)
+            if primaryReturnDeferredToRecording {
+                clearPrimaryReturnCandidate()
+            } else {
+                startDeferredPrimaryRecording(peripheralID: peripheralID)
+                clearPrimaryReturnCandidate()
+            }
         }
         guard case .recording(_, let recordingPeripheralID, _) = mainInputState,
               recordingPeripheralID == peripheralID
@@ -644,7 +682,8 @@ final class VoiceStickCoordinator {
             return
         }
         if primaryReturnCandidatePeripheralID == peripheralID,
-           primaryReturnCandidateSessionID == frame.sessionID {
+           primaryReturnCandidateSessionID == frame.sessionID,
+           !primaryReturnDeferredToRecording {
             primaryReturnCandidateFrames.append(frame)
             return
         }

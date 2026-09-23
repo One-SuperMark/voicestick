@@ -123,12 +123,15 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 if let peripheral = peripherals[peripheralID] {
                     let deviceID = connectedDevices[peripheralID]?.deviceID ?? "unknown"
                     NSLog("BLE send ui_state state=\(state) dev=VS-\(deviceID) text_len=\(text.count)")
+                    DiagnosticLog.write("ui_state_send state=\(state) device=\(deviceID) target=connected")
                     peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
                 } else {
                     NSLog("BLE send ui_state skipped missing peripheral state=\(state) id=\(peripheralID) text_len=\(text.count)")
+                    DiagnosticLog.write("ui_state_send_skipped state=\(state) reason=missing_peripheral")
                 }
             } else {
                 NSLog("BLE send ui_state skipped missing characteristic state=\(state) id=\(peripheralID) text_len=\(text.count)")
+                DiagnosticLog.write("ui_state_send_skipped state=\(state) reason=missing_characteristic")
             }
             return
         }

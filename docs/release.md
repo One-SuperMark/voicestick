@@ -24,6 +24,8 @@ firmware/version.txt
 
 `VERSION` is used by the desktop packaging scripts and the GitHub release workflow. `firmware/version.txt` is the firmware version reported by the device, so it must match the release version for OTA update detection to work correctly.
 
+VoiceStick uses `上游 Fork 基线.本地子版本.调试字母序号` as its five-part local debug-install version scheme.  For example, after `0.3.4.3`, the first debug deployment is `0.3.4.3.a`, then `0.3.4.3.b`.  Before each commit and push, convert the version back to four numeric components and increase the fourth one: `0.3.4.3.a` becomes `0.3.4.4`.  Build, sign, exit the old app, and launch the new ARM64 app before committing and pushing.  Linux CMake and Windows resource metadata consume the first four numeric components, while app/package display uses the full version.
+
 For release `0.2.4`, the tag must be:
 
 ```text

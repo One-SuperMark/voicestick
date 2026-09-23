@@ -538,11 +538,19 @@ static void apply_app_ui_state(const char *state, const char *text)
         ui_status_set_idle();
         note_activity();
         voice_ble_request_slow_interval();
+    } else if (strcmp(state, "manual_send_pending") == 0) {
+        /*
+         * The macOS client is distinguishing a short front-button Return
+         * gesture from a deliberate hold. Audio capture has already started
+         * locally, but this state must not show a misleading Listening screen.
+         */
+        s_app_ui_state = APP_UI_STATE_READY;
+        ui_status_set_idle();
+        note_activity();
     } else if (strcmp(state, "recording") == 0) {
         s_app_ui_state = APP_UI_STATE_RECORDING;
-        if (!s_recording) {
-            ui_status_set_recording(0);
-        }
+        /* Restore Listening after a manual-send decision turns into a hold. */
+        ui_status_set_recording(0);
     } else if (strcmp(state, "thinking") == 0) {
         s_app_ui_state = APP_UI_STATE_THINKING;
         ui_status_set_partial_text("");
