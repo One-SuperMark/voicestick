@@ -96,6 +96,8 @@ final class StatusController {
     var onSetInteractionMode: ((InteractionMode) -> Void)?
     var onSetAutoEnter: ((Bool) -> Void)?
     var onSetSideEnter: ((Bool) -> Void)?
+    var onSetSideDelete: ((Bool) -> Void)?
+    var onSetSideRestoreLastInput: ((Bool) -> Void)?
     var onSetPrimaryEnter: ((Bool) -> Void)?
     var onSetDefaultOutputProfile: ((OutputProfile) -> Void)?
     var onSetDeviceOutputProfile: ((String, OutputProfile) -> Void)?
@@ -109,6 +111,8 @@ final class StatusController {
     private var interactionMode: InteractionMode
     private var autoEnter: Bool
     private var sideEnter: Bool
+    private var sideDelete: Bool
+    private var sideRestoreLastInput: Bool
     private var primaryEnter: Bool
     private var defaultOutputProfile: OutputProfile
     private var deviceOutputProfiles: [String: OutputProfile]
@@ -119,6 +123,8 @@ final class StatusController {
          interactionMode: InteractionMode = .holdToTalk,
          autoEnter: Bool = true,
          sideEnter: Bool = false,
+         sideDelete: Bool = false,
+         sideRestoreLastInput: Bool = true,
          primaryEnter: Bool = false,
          defaultOutputProfile: OutputProfile = .default,
          deviceOutputProfiles: [String: OutputProfile] = [:]) {
@@ -128,6 +134,8 @@ final class StatusController {
         self.interactionMode = interactionMode
         self.autoEnter = autoEnter
         self.sideEnter = autoEnter ? false : sideEnter
+        self.sideDelete = sideDelete
+        self.sideRestoreLastInput = sideDelete ? false : sideRestoreLastInput
         self.primaryEnter = autoEnter || sideEnter ? false : primaryEnter
         self.defaultOutputProfile = defaultOutputProfile
         self.deviceOutputProfiles = deviceOutputProfiles
@@ -174,16 +182,20 @@ final class StatusController {
         rebuildMenu()
     }
 
-    func setInputOptions(interactionMode: InteractionMode, autoEnter: Bool, sideEnter: Bool, primaryEnter: Bool) {
+    func setInputOptions(interactionMode: InteractionMode, autoEnter: Bool, sideEnter: Bool, sideDelete: Bool, sideRestoreLastInput: Bool, primaryEnter: Bool) {
         let normalizedSideEnter = autoEnter ? false : sideEnter
         let normalizedPrimaryEnter = autoEnter || normalizedSideEnter || interactionMode == .clickToTalk ? false : primaryEnter
         guard self.interactionMode != interactionMode ||
                 self.autoEnter != autoEnter ||
                 self.sideEnter != normalizedSideEnter ||
+                self.sideDelete != sideDelete ||
+                self.sideRestoreLastInput != (sideDelete ? false : sideRestoreLastInput) ||
                 self.primaryEnter != normalizedPrimaryEnter else { return }
         self.interactionMode = interactionMode
         self.autoEnter = autoEnter
         self.sideEnter = normalizedSideEnter
+        self.sideDelete = sideDelete
+        self.sideRestoreLastInput = sideDelete ? false : sideRestoreLastInput
         self.primaryEnter = normalizedPrimaryEnter
         rebuildMenu()
     }
@@ -201,7 +213,7 @@ final class StatusController {
 
     private func rebuildMenu() {
         menu.removeAllItems()
-        if hasRecoverableInput {
+        if hasRecoverableInput, sideRestoreLastInput {
             menu.addItem(makeMenuItem(
                 title: "恢复最近一次输入",
                 symbolName: "arrow.uturn.backward",
@@ -252,30 +264,6 @@ final class StatusController {
     private func addInputItems() {
         addOutputItems()
 
-        let afterPasteItem = makeMenuItem(
-            title: "粘贴后按回车",
-            symbolName: "return",
-            action: #selector(toggleAutoEnter)
-        )
-        afterPasteItem.state = autoEnter ? .on : .off
-        menu.addItem(afterPasteItem)
-
-        let sideEnterItem = makeMenuItem(
-            title: "侧键点击发送",
-            symbolName: "rectangle.portrait.and.arrow.right",
-            action: #selector(toggleSideEnter)
-        )
-        sideEnterItem.state = sideEnter ? .on : .off
-        menu.addItem(sideEnterItem)
-
-        let primaryEnterItem = makeMenuItem(
-            title: "前键点击发送",
-            symbolName: "hand.tap",
-            action: #selector(togglePrimaryEnter)
-        )
-        primaryEnterItem.state = primaryEnter ? .on : .off
-        menu.addItem(primaryEnterItem)
-
         let interactionItem = makeMenuItem(
             title: "交互方式",
             symbolName: "hand.tap",
@@ -302,6 +290,48 @@ final class StatusController {
 
         interactionItem.submenu = interactionSubmenu
         menu.addItem(interactionItem)
+        menu.addItem(NSMenuItem.separator())
+
+        let afterPasteItem = makeMenuItem(
+            title: "粘贴后按回车",
+            symbolName: "return",
+            action: #selector(toggleAutoEnter)
+        )
+        afterPasteItem.state = autoEnter ? .on : .off
+        menu.addItem(afterPasteItem)
+
+        let sideEnterItem = makeMenuItem(
+            title: "侧键点击发送",
+            symbolName: "rectangle.portrait.and.arrow.right",
+            action: #selector(toggleSideEnter)
+        )
+        sideEnterItem.state = sideEnter ? .on : .off
+        menu.addItem(sideEnterItem)
+
+        let primaryEnterItem = makeMenuItem(
+            title: "前键点击发送",
+            symbolName: "hand.tap",
+            action: #selector(togglePrimaryEnter)
+        )
+        primaryEnterItem.state = primaryEnter ? .on : .off
+        menu.addItem(primaryEnterItem)
+        menu.addItem(NSMenuItem.separator())
+
+        let sideDeleteItem = makeMenuItem(
+            title: "侧键删除",
+            symbolName: "delete.left",
+            action: #selector(toggleSideDelete)
+        )
+        sideDeleteItem.state = sideDelete ? .on : .off
+        menu.addItem(sideDeleteItem)
+
+        let sideRestoreLastInputItem = makeMenuItem(
+            title: "侧键恢复上一次输入",
+            symbolName: "arrow.uturn.backward",
+            action: #selector(toggleSideRestoreLastInput)
+        )
+        sideRestoreLastInputItem.state = sideRestoreLastInput ? .on : .off
+        menu.addItem(sideRestoreLastInputItem)
         menu.addItem(NSMenuItem.separator())
     }
 
@@ -822,6 +852,24 @@ final class StatusController {
         }
         rebuildMenu()
         onSetSideEnter?(sideEnter)
+    }
+
+    @objc private func toggleSideDelete() {
+        sideDelete.toggle()
+        if sideDelete {
+            sideRestoreLastInput = false
+        }
+        rebuildMenu()
+        onSetSideDelete?(sideDelete)
+    }
+
+    @objc private func toggleSideRestoreLastInput() {
+        sideRestoreLastInput.toggle()
+        if sideRestoreLastInput {
+            sideDelete = false
+        }
+        rebuildMenu()
+        onSetSideRestoreLastInput?(sideRestoreLastInput)
     }
 
     @objc private func togglePrimaryEnter() {

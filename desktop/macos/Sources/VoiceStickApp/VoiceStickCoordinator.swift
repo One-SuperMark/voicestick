@@ -540,6 +540,15 @@ final class VoiceStickCoordinator {
             return
         }
 
+        if config.sideDelete,
+           pendingPasteState.isIdle,
+           !mainInputState.isBusy,
+           !isWaitingForFinalText {
+            inputInjector.pressDeleteBackward()
+            DiagnosticLog.write("side_delete device=\(deviceID(for: peripheralID) ?? "unknown")")
+            return
+        }
+
         cancelPendingPaste(peripheralID: peripheralID)
     }
 
@@ -1509,7 +1518,7 @@ final class VoiceStickCoordinator {
             cancelRecognitionInProgress()
             return
         }
-        if pendingPasteText == nil {
+        if pendingPasteText == nil, config.sideRestoreLastInput {
             _ = restoreLastInputConfirmation(peripheralID: peripheralID)
             return
         }

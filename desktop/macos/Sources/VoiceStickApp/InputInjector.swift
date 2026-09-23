@@ -37,6 +37,11 @@ final class InputInjector {
         sendReturn()
     }
 
+    func pressDeleteBackward() {
+        NSLog("InputInjector secondary_delete")
+        sendKey(0x33)
+    }
+
     private func sendCommandV() {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return }
         let commandDown = CGEvent(keyboardEventSource: source, virtualKey: 0x37, keyDown: true)
@@ -61,9 +66,13 @@ final class InputInjector {
     }
 
     private func sendReturn() {
+        sendKey(0x24)
+    }
+
+    private func sendKey(_ virtualKey: CGKeyCode) {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return }
-        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: true)
-        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: false)
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true)
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false)
         keyDown?.flags = []
         keyUp?.flags = []
         keyDown?.post(tap: .cghidEventTap)

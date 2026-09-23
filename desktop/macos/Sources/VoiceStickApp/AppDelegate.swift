@@ -97,6 +97,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             interactionMode: config.interactionMode,
             autoEnter: config.autoEnter,
             sideEnter: config.sideEnter,
+            sideDelete: config.sideDelete,
+            sideRestoreLastInput: config.sideRestoreLastInput,
             primaryEnter: config.primaryEnter,
             defaultOutputProfile: config.defaultOutputProfile,
             deviceOutputProfiles: config.deviceOutputProfiles
@@ -119,6 +121,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     interactionMode: config.interactionMode,
                     autoEnter: config.autoEnter,
                     sideEnter: config.sideEnter,
+                    sideDelete: config.sideDelete,
+                    sideRestoreLastInput: config.sideRestoreLastInput,
                     primaryEnter: config.primaryEnter
                 )
                 self?.statusController?.setDefaultOutputProfile(config.defaultOutputProfile)
@@ -152,16 +156,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.coordinator?.restoreLastInputConfirmation() ?? false
         }
         statusController.onSetInteractionMode = { [weak self] mode in
-            self?.updateInputOptions(interactionMode: mode, autoEnter: nil, sideEnter: nil, primaryEnter: nil)
+            self?.updateInputOptions(interactionMode: mode, autoEnter: nil, sideEnter: nil, sideDelete: nil, sideRestoreLastInput: nil, primaryEnter: nil)
         }
         statusController.onSetAutoEnter = { [weak self] autoEnter in
-            self?.updateInputOptions(interactionMode: nil, autoEnter: autoEnter, sideEnter: nil, primaryEnter: nil)
+            self?.updateInputOptions(interactionMode: nil, autoEnter: autoEnter, sideEnter: nil, sideDelete: nil, sideRestoreLastInput: nil, primaryEnter: nil)
         }
         statusController.onSetSideEnter = { [weak self] sideEnter in
-            self?.updateInputOptions(interactionMode: nil, autoEnter: nil, sideEnter: sideEnter, primaryEnter: nil)
+            self?.updateInputOptions(interactionMode: nil, autoEnter: nil, sideEnter: sideEnter, sideDelete: nil, sideRestoreLastInput: nil, primaryEnter: nil)
+        }
+        statusController.onSetSideDelete = { [weak self] sideDelete in
+            self?.updateInputOptions(interactionMode: nil, autoEnter: nil, sideEnter: nil, sideDelete: sideDelete, sideRestoreLastInput: nil, primaryEnter: nil)
+        }
+        statusController.onSetSideRestoreLastInput = { [weak self] sideRestoreLastInput in
+            self?.updateInputOptions(interactionMode: nil, autoEnter: nil, sideEnter: nil, sideDelete: nil, sideRestoreLastInput: sideRestoreLastInput, primaryEnter: nil)
         }
         statusController.onSetPrimaryEnter = { [weak self] primaryEnter in
-            self?.updateInputOptions(interactionMode: nil, autoEnter: nil, sideEnter: nil, primaryEnter: primaryEnter)
+            self?.updateInputOptions(interactionMode: nil, autoEnter: nil, sideEnter: nil, sideDelete: nil, sideRestoreLastInput: nil, primaryEnter: primaryEnter)
         }
         statusController.onSetDefaultOutputProfile = { [weak self] profile in
             self?.updateDefaultOutputProfile(profile)
@@ -179,7 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         coordinator.start()
     }
 
-    private func updateInputOptions(interactionMode: InteractionMode?, autoEnter: Bool?, sideEnter: Bool?, primaryEnter: Bool?) {
+    private func updateInputOptions(interactionMode: InteractionMode?, autoEnter: Bool?, sideEnter: Bool?, sideDelete: Bool?, sideRestoreLastInput: Bool?, primaryEnter: Bool?) {
         var config = self.config
         if let interactionMode {
             config.interactionMode = interactionMode
@@ -201,6 +211,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 config.primaryEnter = false
             }
         }
+        if let sideDelete {
+            config.sideDelete = sideDelete
+            if sideDelete {
+                config.sideRestoreLastInput = false
+            }
+        }
+        if let sideRestoreLastInput {
+            config.sideRestoreLastInput = sideRestoreLastInput
+            if sideRestoreLastInput {
+                config.sideDelete = false
+            }
+        }
         if let primaryEnter {
             config.primaryEnter = primaryEnter
             if primaryEnter {
@@ -216,6 +238,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 interactionMode: config.interactionMode,
                 autoEnter: config.autoEnter,
                 sideEnter: config.sideEnter,
+                sideDelete: config.sideDelete,
+                sideRestoreLastInput: config.sideRestoreLastInput,
                 primaryEnter: config.primaryEnter
             )
             coordinator?.updateConfig(config)

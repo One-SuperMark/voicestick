@@ -141,6 +141,8 @@ struct AppConfig {
     var deviceOutputProfiles: [String: OutputProfile]
     var autoEnter: Bool
     var sideEnter: Bool
+    var sideDelete: Bool
+    var sideRestoreLastInput: Bool
     var primaryEnter: Bool
     var debugAudioCache: Bool
     var debugAudioDirectory: URL
@@ -197,6 +199,8 @@ struct AppConfig {
             deviceOutputProfiles: [:],
             autoEnter: true,
             sideEnter: false,
+            sideDelete: false,
+            sideRestoreLastInput: true,
             primaryEnter: false,
             debugAudioCache: false,
             debugAudioDirectory: defaultDebugAudioDirectory
@@ -216,6 +220,8 @@ struct AppConfig {
 
         let autoEnter = file.auto_enter ?? defaults.autoEnter
         let sideEnter = file.side_enter ?? !autoEnter
+        let sideDelete = file.side_delete ?? false
+        let sideRestoreLastInput = file.side_restore_last_input ?? !sideDelete
         let primaryEnter = file.primary_enter ?? false
         let normalizedSideEnter = autoEnter ? false : sideEnter
         let normalizedPrimaryEnter = autoEnter || normalizedSideEnter ? false : primaryEnter
@@ -251,6 +257,8 @@ struct AppConfig {
             ),
             autoEnter: autoEnter,
             sideEnter: normalizedSideEnter,
+            sideDelete: sideDelete,
+            sideRestoreLastInput: sideDelete ? false : sideRestoreLastInput,
             primaryEnter: normalizedPrimaryEnter,
             debugAudioCache: file.debug_audio_cache ?? defaults.debugAudioCache,
             debugAudioDirectory: directoryValue(file.debug_audio_dir, default: defaults.debugAudioDirectory)
@@ -275,6 +283,8 @@ struct AppConfig {
         device_overlay_positions = "\(deviceOverlayPositionText.tomlEscaped)"
         auto_enter = \(autoEnter.tomlValue)
         side_enter = \(sideEnter.tomlValue)
+        side_delete = \(sideDelete.tomlValue)
+        side_restore_last_input = \(sideRestoreLastInput.tomlValue)
         primary_enter = \(primaryEnter.tomlValue)
         debug_audio_cache = \(debugAudioCache.tomlValue)
         debug_audio_dir = "\(debugAudioDirectory.path.tomlEscaped)"
@@ -301,6 +311,8 @@ struct AppConfig {
 
         let autoEnter = boolValue(values["auto_enter"], default: defaults.autoEnter)
         let sideEnter = boolValue(values["side_enter"], default: !autoEnter)
+        let sideDelete = boolValue(values["side_delete"], default: false)
+        let sideRestoreLastInput = boolValue(values["side_restore_last_input"], default: !sideDelete)
         let primaryEnter = boolValue(values["primary_enter"], default: false)
         let normalizedSideEnter = autoEnter ? false : sideEnter
         let normalizedPrimaryEnter = autoEnter || normalizedSideEnter ? false : primaryEnter
@@ -328,6 +340,8 @@ struct AppConfig {
             deviceOutputProfiles: [:],
             autoEnter: autoEnter,
             sideEnter: normalizedSideEnter,
+            sideDelete: sideDelete,
+            sideRestoreLastInput: sideDelete ? false : sideRestoreLastInput,
             primaryEnter: normalizedPrimaryEnter,
             debugAudioCache: boolValue(values["debug_audio_cache"], default: defaults.debugAudioCache),
             debugAudioDirectory: directoryValue(values["debug_audio_dir"], default: defaults.debugAudioDirectory)
@@ -552,6 +566,8 @@ private struct ConfigFile: Decodable {
     var device_overlay_positions: String?
     var auto_enter: Bool?
     var side_enter: Bool?
+    var side_delete: Bool?
+    var side_restore_last_input: Bool?
     var primary_enter: Bool?
     var debug_audio_cache: Bool?
     var debug_audio_dir: String?

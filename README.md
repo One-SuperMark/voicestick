@@ -25,7 +25,7 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - During recognition, the macOS app shows a floating overlay and menu bar status. The firmware display stays in the thinking state after button release until the text is pasted or cancelled.
 - Final text enters a 0.25 second confirmation countdown.
 - Pressing the front button during the countdown pauses auto-paste. Pressing the front button again confirms paste; pressing the side button cancels it.
-- When `side_enter` or `primary_enter` is enabled, clicking the selected hardware button once after a final result was pasted sends Return. For the shared front button, Return is emitted only after a press shorter than 0.65 seconds is released; holding it keeps the normal push-to-talk behavior and never sends Return. The app buffers audio while it distinguishes that gesture so recording does not lose its opening audio. Those manual-send modes are mutually exclusive with automatic Return; the desktop menu retains **Restore Last Input** for the last recoverable confirmation.
+- When `side_enter` or `primary_enter` is enabled, clicking the selected hardware button once after a final result was pasted sends Return. For the shared front button, Return is emitted only after a press shorter than 0.65 seconds is released; holding it keeps the normal push-to-talk behavior and never sends Return. The app buffers audio while it distinguishes that gesture so recording does not lose its opening audio. Those manual-send modes are mutually exclusive with automatic Return. `side_delete` and `side_restore_last_input` are a separate mutually exclusive pair: the former sends one Backspace for each idle side-button click, while the latter restores the most recent input. Neither changes the three send modes.
 - The status menu includes **打开辅助功能设置**, which opens macOS’s Accessibility / Device Control & Data Access permission page and shows a floating, draggable VoiceStick icon. Drop that icon into the permission list when the app is not already listed. It never changes a permission automatically.
 - Optional debug audio cache saves each valid recognition session as Ogg Opus, with the source device ID included in the file name when available.
 - Firmware updates are checked from a signed-by-hash manifest on app launch, device connect/reconnect, and manual menu refresh. Updates are offered per connected device.
@@ -237,6 +237,8 @@ device_theme_colors = ""
 device_overlay_positions = ""
 auto_enter = true
 side_enter = false
+side_delete = false
+side_restore_last_input = true
 primary_enter = false
 debug_audio_cache = false
 # debug_audio_dir = "~/Library/Application Support/VoiceStick/DebugAudio"
@@ -271,6 +273,8 @@ Fields:
 | `device_overlay_positions` | Optional per-device overlay positions, for example `C3D8:top_left,09AF:bottom_right` |
 | `auto_enter` | Whether to press Return after paste |
 | `side_enter` | Whether the side button sends Return after a manual paste; mutually exclusive with `auto_enter` |
+| `side_delete` | Whether each idle side-button click sends one Backspace; mutually exclusive with `side_restore_last_input` |
+| `side_restore_last_input` | Whether an idle side-button click restores the most recent input; mutually exclusive with `side_delete` |
 | `primary_enter` | Whether the front button sends Return after a manual paste; mutually exclusive with `auto_enter`, `side_enter`, and click-to-talk |
 | `debug_audio_cache` | Whether to save debug Ogg Opus files |
 | `debug_audio_dir` | Debug audio output directory |
