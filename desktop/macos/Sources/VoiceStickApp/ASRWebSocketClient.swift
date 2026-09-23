@@ -90,6 +90,7 @@ final class ASRWebSocketClient: ASRClient {
     private var latestSessionTranscript = ""
     private var emittedDefiniteSegmentKeys: Set<String> = []
     private var sessionOptions = ASRSessionOptions()
+    private var didReceiveSessionResponse = false
 
     var onPartial: ((String) -> Void)?
     var onSegment: ((ASRSegment) -> Void)?
@@ -179,7 +180,9 @@ final class ASRWebSocketClient: ASRClient {
         latestSessionTranscript = ""
         emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
         queuedAudioChunks.removeAll(keepingCapacity: true)
+        didReceiveSessionResponse = false
         sessionState = .starting
+        DiagnosticLog.write("asr_session_requested provider=\(config.asrProvider.rawValue) resource=\(config.resourceID)")
 
         switch connectionState {
         case .ready:
@@ -212,6 +215,7 @@ final class ASRWebSocketClient: ASRClient {
 
         connectionState = .connecting
         NSLog("ASR websocket connect provider=\(config.asrProvider.rawValue) request_id=\(connectID)")
+        DiagnosticLog.write("asr_socket_connect_requested provider=\(config.asrProvider.rawValue)")
         let task = URLSession.shared.webSocketTask(with: request)
         webSocket = task
         task.resume()
@@ -226,6 +230,7 @@ final class ASRWebSocketClient: ASRClient {
         }
 
         NSLog("ASR websocket start_session session_id=\(currentSessionID)")
+        DiagnosticLog.write("asr_session_start_sent")
         sendEvent(.startSession, sessionID: currentSessionID, payload: sessionPayload())
     }
 
@@ -471,6 +476,7 @@ final class ASRWebSocketClient: ASRClient {
         case .connectionStarted:
             connectionState = .ready
             NSLog("ASR websocket connection_started connect_id=\(response.sessionID ?? "")")
+            DiagnosticLog.write("asr_socket_connected")
             if sessionState == .starting {
                 sendStartSession()
             }
@@ -487,10 +493,15 @@ final class ASRWebSocketClient: ASRClient {
             guard response.sessionID == currentSessionID else { return }
             sessionState = .streaming
             NSLog("ASR websocket session_started session_id=\(response.sessionID ?? "")")
+            DiagnosticLog.write("asr_session_started queued_audio_chunks=\(queuedAudioChunks.count)")
             flushQueuedAudioChunks()
 
         case .asrResponse, .asrInfo:
             guard response.sessionID == currentSessionID, let text = response.payloadText else { return }
+            if !didReceiveSessionResponse {
+                didReceiveSessionResponse = true
+                DiagnosticLog.write("asr_first_response_received")
+            }
             let transcript = extractTranscript(from: text)
             let definiteSegments = extractNewDefiniteSegments(from: text)
             if !transcript.isEmpty {
@@ -520,6 +531,7 @@ final class ASRWebSocketClient: ASRClient {
                 extractNewDefiniteSegments(from: $0)
             } ?? []
             NSLog("ASR websocket session_finished session_id=\(response.sessionID ?? "") text_len=\(finalText.count)")
+            DiagnosticLog.write("asr_session_finished text_length=\(finalText.count)")
             currentSessionID = nil
             latestSessionTranscript = ""
             emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
@@ -608,6 +620,7 @@ final class ASRWebSocketClient: ASRClient {
         }
         let message = String(data: body, encoding: .utf8) ?? "Unknown ASR error"
         NSLog("ASR server error code=\(code): \(message)")
+        DiagnosticLog.write("asr_server_error code=\(code) message_bytes=\(message.utf8.count)")
         let parsedError = parsedErrorMessage(code: code, message: message)
         failSession(parsedError.message)
         if let upgradeURL = parsedError.upgradeURL {

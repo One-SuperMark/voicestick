@@ -135,10 +135,16 @@ final class VoiceStickCoordinator {
     // The device normally sends an END frame immediately after button-up.
     // Keep only a short fallback so a missing END frame does not add a full second.
     private let audioEndTimeout: TimeInterval = 0.4
+    // If the BLE button-up event is delayed or lost, do not keep the ASR stream
+    // open indefinitely after the device stops producing audio frames. This is
+    // deliberately longer than normal BLE scheduling jitter, while staying well
+    // below the ASR service's upstream-packet timeout.
+    private let audioFrameInactivityTimeout: TimeInterval = 2.5
     private let firmwareManifestCacheDuration: TimeInterval = 24 * 60 * 60
 
     private var mainInputState = MainInputState.ready
     private var receivedAudioFrames = 0
+    private var hasLoggedFirstAudioFrame = false
     private var bufferedOggChunks: [Data] = []
     private var asrStarted = false
     private var sentFinalAudioChunk = false
@@ -161,6 +167,7 @@ final class VoiceStickCoordinator {
     private var primaryReturnDeferredToRecording = false
     private var waitingForAudioEnd = false
     private var audioEndTimeoutTimer: Timer?
+    private var audioFrameInactivityTimer: Timer?
     private var pendingPasteState = PendingPasteState.idle
     private var lastRecoverableText: String?
     private var lastRecoverablePeripheralID: UUID?
@@ -220,6 +227,7 @@ final class VoiceStickCoordinator {
 
     deinit {
         audioEndTimeoutTimer?.invalidate()
+        audioFrameInactivityTimer?.invalidate()
         firmwareManifestRefreshTimer?.invalidate()
     }
 
@@ -613,8 +621,10 @@ final class VoiceStickCoordinator {
         startedAt: Date = Date(),
         preservePrimaryReturnCandidate: Bool = false
     ) {
+        cancelAudioFrameInactivityTimeout()
         mainInputState = .recording(sessionID: sessionID, peripheralID: peripheralID, startedAt: startedAt)
         receivedAudioFrames = 0
+        hasLoggedFirstAudioFrame = false
         bufferedOggChunks.removeAll(keepingCapacity: true)
         asrStarted = false
         sentFinalAudioChunk = false
@@ -692,12 +702,18 @@ final class VoiceStickCoordinator {
 
         if frame.isEnd && frame.payload.isEmpty {
             cancelAudioEndTimeout()
+            cancelAudioFrameInactivityTimeout()
             sendFinalOggChunkIfNeeded(recordingDuration: currentRecordingDuration)
             return
         }
 
         guard !frame.payload.isEmpty else { return }
+        scheduleAudioFrameInactivityTimeout(sessionID: frame.sessionID, peripheralID: peripheralID)
         receivedAudioFrames += 1
+        if !hasLoggedFirstAudioFrame {
+            hasLoggedFirstAudioFrame = true
+            DiagnosticLog.write("audio_first_frame_received device=\(deviceID(for: peripheralID) ?? "unknown") session=\(frame.sessionID)")
+        }
         let oggChunk = oggMuxer.append(opusPayload: frame.payload, isLast: frame.isEnd)
         debugAudioRecorder.append(oggChunk)
         sendOrBufferOggChunk(
@@ -707,6 +723,7 @@ final class VoiceStickCoordinator {
         )
         if frame.isEnd {
             cancelAudioEndTimeout()
+            cancelAudioFrameInactivityTimeout()
             let recordingDuration = currentRecordingDuration
             sentFinalAudioChunk = true
             enterFinalizingState(reason: "audio_end")
@@ -730,6 +747,7 @@ final class VoiceStickCoordinator {
 
     private func beginWaitingForAudioEnd(reason: String) {
         guard !waitingForAudioEnd else { return }
+        cancelAudioFrameInactivityTimeout()
         waitingForAudioEnd = true
         NSLog("Waiting for audio END frame reason=\(reason)")
         enterFinalizingState(reason: reason)
@@ -765,6 +783,26 @@ final class VoiceStickCoordinator {
         waitingForAudioEnd = false
         audioEndTimeoutTimer?.invalidate()
         audioEndTimeoutTimer = nil
+    }
+
+    private func scheduleAudioFrameInactivityTimeout(sessionID: UInt32, peripheralID: UUID) {
+        audioFrameInactivityTimer?.invalidate()
+        audioFrameInactivityTimer = Timer.scheduledTimer(withTimeInterval: audioFrameInactivityTimeout, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            guard case .recording(let activeSessionID, let activePeripheralID, _) = self.mainInputState,
+                  activeSessionID == sessionID,
+                  activePeripheralID == peripheralID,
+                  !self.sentFinalAudioChunk
+            else { return }
+            DiagnosticLog.write("audio_frame_inactivity_finalize device=\(self.deviceID(for: peripheralID) ?? "unknown") session=\(sessionID) timeout_ms=\(Int(self.audioFrameInactivityTimeout * 1_000)) frames=\(self.receivedAudioFrames)")
+            NSLog("Audio frame inactivity timeout; finalizing buffered audio")
+            self.sendFinalOggChunkIfNeeded(recordingDuration: self.currentRecordingDuration)
+        }
+    }
+
+    private func cancelAudioFrameInactivityTimeout() {
+        audioFrameInactivityTimer?.invalidate()
+        audioFrameInactivityTimer = nil
     }
 
     private func handleSubtitlePrimaryButtonDown(sessionID: UInt32?, peripheralID: UUID) {
@@ -961,6 +999,7 @@ final class VoiceStickCoordinator {
         guard !sentFinalAudioChunk else { return }
         sentFinalAudioChunk = true
         cancelAudioEndTimeout()
+        cancelAudioFrameInactivityTimeout()
         enterFinalizingState(reason: "final_audio_sent")
         if !asrStarted && recordingDuration < minimumRecordingDuration {
             cancelShortRecording()
@@ -972,6 +1011,7 @@ final class VoiceStickCoordinator {
         }
 
         let finalChunk = oggMuxer.finish()
+        DiagnosticLog.write("audio_final_chunk_sent device=\(activeDeviceID ?? "unknown") session=\(activeSessionID.map(String.init) ?? "nil") recording_ms=\(Int(recordingDuration * 1_000)) frames=\(receivedAudioFrames)")
         debugAudioRecorder.append(finalChunk)
         debugAudioRecorder.finish()
         sendOrBufferOggChunk(finalChunk, isLast: true, canStartASR: true)
@@ -1028,6 +1068,7 @@ final class VoiceStickCoordinator {
     private func cancelShortRecording() {
         NSLog("Ignoring short recording under \(minimumRecordingDuration)s")
         cancelAudioEndTimeout()
+        cancelAudioFrameInactivityTimeout()
         bufferedOggChunks.removeAll(keepingCapacity: true)
         asr.cancel()
         asrStarted = false
@@ -1042,6 +1083,7 @@ final class VoiceStickCoordinator {
 
     private func finishWithFinalText(_ text: String) {
         guard !pastedFinalText else { return }
+        DiagnosticLog.write("recognition_final_received device=\(activeDeviceID ?? "unknown") session=\(activeSessionID.map(String.init) ?? "nil") text_length=\(text.count)")
         let profile = outputProfile(for: activeDeviceID)
         if profile.target == .subtitle {
             pastedFinalText = true
@@ -1295,7 +1337,9 @@ final class VoiceStickCoordinator {
 
     private func finishWithASRError(_ message: String) {
         NSLog("ASR error: \(message)")
+        DiagnosticLog.write("recognition_error_received device=\(activeDeviceID ?? "unknown") session=\(activeSessionID.map(String.init) ?? "nil") message_length=\(message.utf8.count)")
         cancelAudioEndTimeout()
+        cancelAudioFrameInactivityTimeout()
         asr.cancel()
         pendingSecondaryReturn = false
         pendingPrimaryReturn = false
@@ -1456,6 +1500,7 @@ final class VoiceStickCoordinator {
 
     private func cancelRecognitionInProgress() {
         cancelAudioEndTimeout()
+        cancelAudioFrameInactivityTimeout()
         asr.cancel()
         pendingPasteState = .idle
         finishRecognitionCycle()
@@ -1491,6 +1536,7 @@ final class VoiceStickCoordinator {
 
     private func finishRecognitionCycle() {
         cancelAudioEndTimeout()
+        cancelAudioFrameInactivityTimeout()
         asrStarted = false
         sentFinalAudioChunk = false
         pastedFinalText = false
