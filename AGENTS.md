@@ -6,7 +6,8 @@
 - 未提交的工作区改动不代表已经发布、安装到 macOS、烧录到设备或完成真实硬件验收。
 - Git 提交信息使用中文；只暂存当前任务负责的文件或具体差异，默认不推送。
 - 每次提交包含面向用户的功能更新的代码时，必须同步提升根目录 `VERSION` 与 macOS `Info.plist` 的版本号；版本使用四段式“上游 Fork 基线.本地子版本”，例如基线 `0.3.4` 的首次本地修改为 `0.3.4.1`。未提交的工作区调整不得单独提升版本号；仅可作为本地验收以相同版本覆盖安装，不能表述为正式发布。
-- 重构或更新安装流程必须先按 `/Applications/VoiceStick.app/Contents/MacOS/VoiceStickApp` 可执行进程确认旧版已退出，验证新包签名与可启动性后再启动新版本，并在交付时报告实际运行的版本与架构。
+- 重构或更新安装流程必须先按 `/Applications/VoiceStick.app/Contents/MacOS/VoiceStickApp` 可执行进程确认旧版已退出，验证新包签名与可启动性后再启动新版本，并在交付时报告实际运行的版本与架构。`/Applications` 只保留当前 `VoiceStick.app`，不得保存本地备份；如需可恢复备份，放入仓库 `build/local-app-backups/`。
+- 本机已配置 `Developer ID Application: Zhejiang Zhongwei Safety Technology Co., LTD (322V86ZQ9K)`；后续本地安装和发布优先使用此固定身份签名，不得在可用时回退到 ad-hoc 签名。
 
 ## 代码与项目知识同步
 

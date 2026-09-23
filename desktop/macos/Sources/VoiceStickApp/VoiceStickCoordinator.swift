@@ -132,7 +132,9 @@ final class VoiceStickCoordinator {
     private let firmwareManifestClient = FirmwareManifestClient()
     private var debugAudioRecorder: DebugAudioRecorder
     private let minimumRecordingDuration: TimeInterval = 0.5
-    private let audioEndTimeout: TimeInterval = 1.0
+    // The device normally sends an END frame immediately after button-up.
+    // Keep only a short fallback so a missing END frame does not add a full second.
+    private let audioEndTimeout: TimeInterval = 0.4
     private let firmwareManifestCacheDuration: TimeInterval = 24 * 60 * 60
 
     private var mainInputState = MainInputState.ready
@@ -143,6 +145,14 @@ final class VoiceStickCoordinator {
     private var pastedFinalText = false
     private var pendingSecondaryReturn = false
     private var pendingPrimaryReturn = false
+    // The primary button is shared by push-to-talk and optional Return sending.
+    // Delay recording briefly so a tap can submit without showing a recording UI.
+    private let primaryReturnTapDuration: TimeInterval = 0.35
+    private var primaryReturnCandidatePeripheralID: UUID?
+    private var primaryReturnCandidateSessionID: UInt32?
+    private var primaryReturnCandidateStartedAt: Date?
+    private var primaryReturnCandidateFrames: [AudioFrame] = []
+    private var primaryReturnStartWorkItem: DispatchWorkItem?
     private var waitingForAudioEnd = false
     private var audioEndTimeoutTimer: Timer?
     private var pendingPasteState = PendingPasteState.idle
@@ -431,7 +441,7 @@ final class VoiceStickCoordinator {
         NSLog("Button up button=\(event.button ?? "nil") dev=VS-\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil") duration_ms=\(event.durationMs.map(String.init) ?? "nil")")
         switch event.button {
         case "primary":
-            handlePrimaryButtonUp(peripheralID: peripheralID)
+            handlePrimaryButtonUp(peripheralID: peripheralID, durationMs: event.durationMs)
         case "secondary":
             handleSecondaryButtonClick(peripheralID: peripheralID)
         default:
@@ -452,7 +462,7 @@ final class VoiceStickCoordinator {
             }
             if case .recording(_, let recordingPeripheralID, _) = mainInputState,
                recordingPeripheralID == peripheralID {
-                handlePrimaryButtonUp(peripheralID: peripheralID)
+                handlePrimaryButtonUp(peripheralID: peripheralID, durationMs: event.durationMs)
             } else if case .finalizing(_, let finalizingPeripheralID, _) = mainInputState,
                       finalizingPeripheralID == peripheralID {
                 NSLog("Ignoring primary button click while recording is finalizing")
@@ -498,8 +508,7 @@ final class VoiceStickCoordinator {
            pendingPasteState.isIdle,
            !mainInputState.isBusy,
            !isWaitingForFinalText {
-            pendingPrimaryReturn = false
-            inputInjector.pressReturn()
+            beginPrimaryReturnGesture(sessionID: sessionID, peripheralID: peripheralID)
             return
         }
         if handleFrontButtonDuringPendingPaste(peripheralID: peripheralID) {
@@ -520,7 +529,52 @@ final class VoiceStickCoordinator {
             return
         }
 
-        mainInputState = .recording(sessionID: sessionID, peripheralID: peripheralID, startedAt: Date())
+        beginPrimaryRecording(sessionID: sessionID, peripheralID: peripheralID)
+    }
+
+    private func beginPrimaryReturnGesture(sessionID: UInt32?, peripheralID: UUID) {
+        clearPrimaryReturnCandidate()
+        primaryReturnCandidatePeripheralID = peripheralID
+        primaryReturnCandidateSessionID = sessionID
+        primaryReturnCandidateStartedAt = Date()
+        let workItem = DispatchWorkItem { [weak self, peripheralID] in
+            self?.startDeferredPrimaryRecording(peripheralID: peripheralID)
+        }
+        primaryReturnStartWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + primaryReturnTapDuration, execute: workItem)
+    }
+
+    private func clearPrimaryReturnCandidate() {
+        primaryReturnStartWorkItem?.cancel()
+        primaryReturnStartWorkItem = nil
+        primaryReturnCandidatePeripheralID = nil
+        primaryReturnCandidateSessionID = nil
+        primaryReturnCandidateStartedAt = nil
+        primaryReturnCandidateFrames.removeAll(keepingCapacity: true)
+    }
+
+    private func startDeferredPrimaryRecording(peripheralID: UUID) {
+        guard primaryReturnCandidatePeripheralID == peripheralID else { return }
+        let sessionID = primaryReturnCandidateSessionID
+        let startedAt = primaryReturnCandidateStartedAt
+        let bufferedFrames = primaryReturnCandidateFrames
+        clearPrimaryReturnCandidate()
+        guard let sessionID, sessionID != 0, let startedAt else {
+            pendingPrimaryReturn = false
+            return
+        }
+        beginPrimaryRecording(
+            sessionID: sessionID,
+            peripheralID: peripheralID,
+            startedAt: startedAt
+        )
+        for frame in bufferedFrames {
+            handleAudioFrame(frame, peripheralID: peripheralID)
+        }
+    }
+
+    private func beginPrimaryRecording(sessionID: UInt32, peripheralID: UUID, startedAt: Date = Date()) {
+        mainInputState = .recording(sessionID: sessionID, peripheralID: peripheralID, startedAt: startedAt)
         receivedAudioFrames = 0
         bufferedOggChunks.removeAll(keepingCapacity: true)
         asrStarted = false
@@ -536,10 +590,24 @@ final class VoiceStickCoordinator {
         sendUIStateForActiveDevice("recording")
     }
 
-    private func handlePrimaryButtonUp(peripheralID: UUID) {
+    private func handlePrimaryButtonUp(peripheralID: UUID, durationMs: UInt32? = nil) {
         if activeSubtitleSessions[peripheralID] != nil {
             handleSubtitlePrimaryButtonUp(peripheralID: peripheralID)
             return
+        }
+        if primaryReturnCandidatePeripheralID == peripheralID,
+           let startedAt = primaryReturnCandidateStartedAt {
+            let duration = durationMs.map { TimeInterval($0) / 1_000 }
+                ?? Date().timeIntervalSince(startedAt)
+            if duration < primaryReturnTapDuration {
+                clearPrimaryReturnCandidate()
+                pendingPrimaryReturn = false
+                inputInjector.pressReturn()
+                return
+            }
+            // The event loop did not deliver the hold timer before button-up.
+            // Start and finish the buffered recording without treating it as Return.
+            startDeferredPrimaryRecording(peripheralID: peripheralID)
         }
         guard case .recording(_, let recordingPeripheralID, _) = mainInputState,
               recordingPeripheralID == peripheralID
@@ -558,6 +626,11 @@ final class VoiceStickCoordinator {
     private func handleAudioFrame(_ frame: AudioFrame, peripheralID: UUID) {
         if subtitleCycle(peripheralID: peripheralID, sessionID: frame.sessionID) != nil {
             handleSubtitleAudioFrame(frame, peripheralID: peripheralID)
+            return
+        }
+        if primaryReturnCandidatePeripheralID == peripheralID,
+           primaryReturnCandidateSessionID == frame.sessionID {
+            primaryReturnCandidateFrames.append(frame)
             return
         }
         guard frame.sessionID == activeSessionID, activePeripheralID == peripheralID else { return }

@@ -86,6 +86,7 @@ final class StatusController {
 
     var onQuit: (() -> Void)?
     var onOpenSettings: (() -> Void)?
+    var onOpenAccessibilitySettings: (() -> Void)?
     var onPairDevice: (() -> Void)?
     var onForgetDevice: ((String) -> Void)?
     var onUpdateFirmwareDevice: ((String) -> Void)?
@@ -224,6 +225,12 @@ final class StatusController {
             symbolName: "gearshape",
             action: #selector(openSettings),
             keyEquivalent: ","
+        ))
+
+        menu.addItem(makeMenuItem(
+            title: "打开辅助功能设置",
+            symbolName: "accessibility",
+            action: #selector(openAccessibilitySettings)
         ))
 
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
@@ -693,6 +700,10 @@ final class StatusController {
 
     @objc private func openSettings() {
         onOpenSettings?()
+    }
+
+    @objc private func openAccessibilitySettings() {
+        onOpenAccessibilitySettings?()
     }
 
     @objc private func pairDevice() {

@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pairDeviceWindowController: PairDeviceWindowController?
     private var onboardingWindowController: OnboardingWindowController?
     private var firmwareUpdateWindowController: FirmwareUpdateWindowController?
+    private var accessibilityPermissionPanelController: AccessibilityPermissionPanelController?
     private var dockIconWindowIDs = Set<ObjectIdentifier>()
     private var config = AppConfig.defaults
 
@@ -43,6 +44,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editItem.submenu = editMenu
 
         NSApp.mainMenu = mainMenu
+    }
+
+    private func openAccessibilitySettings() {
+        let settingsURLs = [
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            "x-apple.systempreferences:com.apple.preference.universalaccess"
+        ]
+        for text in settingsURLs {
+            guard let url = URL(string: text) else { continue }
+            if NSWorkspace.shared.open(url) {
+                break
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            let controller = self?.accessibilityPermissionPanelController
+                ?? AccessibilityPermissionPanelController()
+            self?.accessibilityPermissionPanelController = controller
+            controller.show()
+        }
     }
 
     private func startApp(config: AppConfig) {
@@ -84,6 +105,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self?.showDockIconWhileWindowVisible(controller)
             controller.show()
+        }
+        statusController.onOpenAccessibilitySettings = { [weak self] in
+            self?.openAccessibilitySettings()
         }
         statusController.onPairDevice = { [weak self] in
             self?.showPairDeviceWindow()
