@@ -147,7 +147,10 @@ final class VoiceStickCoordinator {
     private var pendingPrimaryReturn = false
     // The primary button is shared by push-to-talk and optional Return sending.
     // Delay recording briefly so a tap can submit without showing a recording UI.
-    private let primaryReturnTapDuration: TimeInterval = 0.35
+    // Physical button-up events can arrive noticeably after a human's click.
+    // Keep this comfortably above an ordinary click so a submit never flashes
+    // the recording UI, while a deliberate hold still begins push-to-talk.
+    private let primaryReturnTapDuration: TimeInterval = 0.65
     private var primaryReturnCandidatePeripheralID: UUID?
     private var primaryReturnCandidateSessionID: UInt32?
     private var primaryReturnCandidateStartedAt: Date?
@@ -453,6 +456,18 @@ final class VoiceStickCoordinator {
         NSLog("Button click button=\(event.button ?? "nil") dev=VS-\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil") duration_ms=\(event.durationMs.map(String.init) ?? "nil")")
         switch event.button {
         case "primary":
+            // Some firmware revisions emit a click in addition to, or instead
+            // of, a usable button-up event. A pending primary submit always
+            // wins over the normal recording path.
+            if pendingPrimaryReturn,
+               pendingPasteState.isIdle,
+               !mainInputState.isBusy,
+               !isWaitingForFinalText {
+                clearPrimaryReturnCandidate()
+                pendingPrimaryReturn = false
+                inputInjector.pressReturn()
+                return
+            }
             if handleFrontButtonDuringPendingPaste(peripheralID: peripheralID) {
                 return
             }
