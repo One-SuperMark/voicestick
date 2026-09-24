@@ -199,13 +199,14 @@ jobs:
         run: |
           set -euo pipefail
           (cd dist && sha256sum -c SHA256SUMS)
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo '::error ::A GitHub Release already exists for this tag.'
             exit 1
           fi
           gh release create "$GITHUB_REF_NAME" \
             "dist/VoiceStick-${VERSION}.dmg" \
             dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
             --title "VoiceStick $VERSION" \
             --generate-notes \
             --verify-tag
