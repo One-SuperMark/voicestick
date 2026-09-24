@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build VoiceStick for macOS as a universal app bundle.
+# Build VoiceStick for macOS as an Apple Silicon app bundle.
 #
 # Produces:
 #   build/VoiceStick-<version>.app
@@ -21,7 +21,7 @@ BUILD_DIR="$ROOT_DIR/build"
 PLIST="$DESKTOP_DIR/Sources/VoiceStickApp/Info.plist"
 VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
 CONFIG="${1:---release}"
-TARGET_ARCHS="arm64 x86_64"
+TARGET_ARCH="arm64"
 SPARKLE_KEY_ACCOUNT="${SPARKLE_KEY_ACCOUNT:-voicestick}"
 
 case "$CONFIG" in
@@ -46,7 +46,7 @@ mkdir -p "$BUILD_DIR"
 
 echo "===================================="
 echo " VoiceStick macOS Build v$VERSION"
-echo " Universal Binary: $TARGET_ARCHS"
+echo " Architecture: $TARGET_ARCH"
 echo "===================================="
 
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
@@ -63,24 +63,21 @@ elif /usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$PLIST" | grep -q "REPLA
     echo "         Generate Sparkle keys before shipping a public release."
 fi
 
-for ARCH in $TARGET_ARCHS; do
-    echo ""
-    echo "Building VoiceStickApp for $ARCH..."
-    SCRATCH="$DESKTOP_DIR/.build-$ARCH"
-    rm -rf "$SCRATCH"
-    swift build \
-        --package-path "$DESKTOP_DIR" \
-        -c "$SWIFT_CONFIG" \
-        --arch "$ARCH" \
-        --scratch-path "$SCRATCH"
-done
+echo ""
+echo "Building VoiceStickApp for $TARGET_ARCH..."
+SCRATCH="$DESKTOP_DIR/.build-$TARGET_ARCH"
+rm -rf "$SCRATCH"
+swift build \
+    --package-path "$DESKTOP_DIR" \
+    -c "$SWIFT_CONFIG" \
+    --arch "$TARGET_ARCH" \
+    --scratch-path "$SCRATCH"
 
 APP_DIR="$BUILD_DIR/VoiceStick-${VERSION}.app"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$APP_DIR/Contents/Frameworks"
 
 ARM_BUILD="$DESKTOP_DIR/.build-arm64/arm64-apple-macosx/$SWIFT_CONFIG"
-X86_BUILD="$DESKTOP_DIR/.build-x86_64/x86_64-apple-macosx/$SWIFT_CONFIG"
 if [ "$SWIFT_CONFIG" = "release" ]; then
     PRODUCT_CONFIG="Release"
 else
@@ -89,21 +86,18 @@ fi
 if [ ! -f "$ARM_BUILD/VoiceStickApp" ]; then
     ARM_BUILD="$DESKTOP_DIR/.build-arm64/out/Products/$PRODUCT_CONFIG"
 fi
-if [ ! -f "$X86_BUILD/VoiceStickApp" ]; then
-    X86_BUILD="$DESKTOP_DIR/.build-x86_64/out/Products/$PRODUCT_CONFIG"
-fi
-
-if [ ! -f "$ARM_BUILD/VoiceStickApp" ] || [ ! -f "$X86_BUILD/VoiceStickApp" ]; then
-    echo "Error: universal build outputs were not found."
+if [ ! -f "$ARM_BUILD/VoiceStickApp" ]; then
+    echo "Error: ARM64 build output was not found."
     exit 1
 fi
 
 echo ""
-echo "Creating universal executable..."
-lipo -create \
-    "$ARM_BUILD/VoiceStickApp" \
-    "$X86_BUILD/VoiceStickApp" \
-    -output "$APP_DIR/Contents/MacOS/VoiceStickApp"
+echo "Copying ARM64 executable..."
+cp "$ARM_BUILD/VoiceStickApp" "$APP_DIR/Contents/MacOS/VoiceStickApp"
+if [ "$(lipo -archs "$APP_DIR/Contents/MacOS/VoiceStickApp")" != "$TARGET_ARCH" ]; then
+    echo "Error: packaged executable is not ARM64-only."
+    exit 1
+fi
 
 cp "$PLIST" "$APP_DIR/Contents/Info.plist"
 
@@ -173,8 +167,11 @@ if [ -n "$SIGN_TOOL" ] && [ -x "$SIGN_TOOL" ]; then
     ED_SIGNATURE="$(printf '%s\n' "$SIGN_OUTPUT" | sed -nE 's/.*sparkle:edSignature="([^"]+)".*/\1/p' | head -1)"
     if [ -n "$ED_SIGNATURE" ]; then
         printf '%s\n' "$ED_SIGNATURE" > "$SIGNATURE_PATH"
+    elif [ -n "${SPARKLE_PRIVATE_ED_KEY:-}" ]; then
+        echo "Error: Sparkle ZIP signing failed."
+        exit 1
     else
-        printf '%s\n' "$SIGN_OUTPUT" > "$SIGNATURE_PATH"
+        echo "No Sparkle signing key was available; skipping ZIP signature."
     fi
 else
     echo "WARNING: Sparkle sign_update tool was not found."

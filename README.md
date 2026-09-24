@@ -25,7 +25,7 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - During recognition, the macOS app shows a floating overlay and menu bar status. The firmware display stays in the thinking state after button release until the text is pasted or cancelled.
 - Final text enters a 0.25 second confirmation countdown.
 - Pressing the front button during the countdown pauses auto-paste. Pressing the front button again confirms paste; pressing the side button cancels it.
-- When `side_enter` or `primary_enter` is enabled, clicking the selected hardware button once after a final result was pasted sends Return. For the shared front button, Return is emitted only after a press shorter than 0.65 seconds is released; holding it keeps the normal push-to-talk behavior and never sends Return. The app buffers audio while it distinguishes that gesture so recording does not lose its opening audio. Those manual-send modes are mutually exclusive with automatic Return. `side_delete` and `side_restore_last_input` are a separate mutually exclusive pair: the former sends one Backspace for each idle side-button click, while the latter restores the most recent input. Neither changes the three send modes.
+- With `side_enter` enabled, the side button sends Return once after a final result was manually pasted. With `primary_enter` enabled, every idle short front-button press sends Return, without depending on a previous recording or pasted recognition result; holding the front button beyond the short-press threshold keeps the normal push-to-talk behavior. The app buffers audio while it distinguishes that gesture so recording does not lose its opening audio. Those manual-send modes are mutually exclusive with automatic Return. `side_delete` and `side_restore_last_input` are a separate mutually exclusive pair: the former sends one Backspace for each idle side-button click, while the latter restores the most recent input. Neither changes the three send modes.
 - The status menu includes **打开辅助功能设置**, which opens macOS’s Accessibility / Device Control & Data Access permission page and shows a floating, draggable VoiceStick icon. Drop that icon into the permission list when the app is not already listed. It never changes a permission automatically.
 - Optional debug audio cache saves each valid recognition session as Ogg Opus, with the source device ID included in the file name when available.
 - Firmware updates are checked from a signed-by-hash manifest on app launch, device connect/reconnect, and manual menu refresh. Updates are offered per connected device.
@@ -48,7 +48,8 @@ Main pin definitions live in `firmware/components/stick_s3_board/include/stick_s
 | State | Front button | Side button |
 | --- | --- | --- |
 | Unpaired / disconnected | No recording; screen shows `VS-XXXX` | No effective action |
-| Connected idle after a manual paste with a manual-send option enabled | The selected side or front key presses Return once | Press Return once when side send is enabled |
+| Connected idle with `primary_enter` enabled | Short press sends Return once; hold to record | No action (use the desktop menu to restore the last input confirmation) |
+| Connected idle after a manual paste with `side_enter` enabled | Hold to record | Press Return once |
 | Connected idle otherwise | Hold to record | No action (use the desktop menu to restore the last input confirmation) |
 | Recording | Release to finish recording | Does not cancel the active recording |
 | Thinking / finalizing | New recording is ignored | Cancel the in-progress recognition |
@@ -147,7 +148,7 @@ SPARKLE_PUBLIC_ED_KEY="..." scripts/build-macos.sh --release
 scripts/make-dmg.sh
 ```
 
-The build script writes `build/VoiceStick-<version>.app`, `build/VoiceStick-<version>.zip`, and a Sparkle signature file. Upload the DMG and ZIP to GitHub Releases, then update `website/appcast.xml` for the GitHub Pages update feed.
+The build script writes an ARM64-only `build/VoiceStick-<version>.app` and ZIP. It writes a Sparkle signature only when signing keys are available. A public release additionally needs Developer ID signing, notarization, and a matching update feed.
 
 For a distributable Windows release with WinSparkle updates, the MSI is the update package. The Windows signing certificate is expected to live on the local signing machine, such as a USB hardware key:
 
@@ -173,7 +174,9 @@ desktop/linux/build/VoiceStick
 
 Config is `~/.config/voicestick/config.toml`. Text is copied with GTK, then VoiceStick tries AT-SPI insert. If that fails, it uses the GNOME Remote Desktop portal to inject Ctrl+V. See `desktop/linux/README.md`.
 
-GitHub Actions can do the macOS and firmware release path automatically when a `v<version>` tag is pushed. The tag must match `VERSION`, for example `VERSION=0.2.1` pairs with `v0.2.1`. The release workflow publishes the macOS DMG/ZIP/signature and firmware assets to GitHub Releases, then deploys the website/appcast to GitHub Pages. The Windows MSI is uploaded afterward from the local signing machine. See `docs/release.md` for the full release process, including the Windows-first and Windows-afterward flows.
+In the One-SuperMark fork, commit a four-number desktop version in `VERSION` and the macOS `Info.plist`, then push `main`. The `macOS ARM64 Package` GitHub Action builds an ARM64 DMG and ZIP as downloadable test artifacts; local repackaging is not required. This path does not publish a GitHub Release, update the running app, or build firmware. Without Apple signing credentials on GitHub, its package is ad-hoc signed and not notarized. See `docs/release.md` for the fork workflow and its verification boundary.
+
+The original multi-platform `Release Build` workflow is guarded to run only in `78/voicestick`; its firmware/OSS and website deployment steps do not run in this fork. The following firmware deployment details describe that original workflow, not the fork's desktop package action.
 
 The same release workflow also builds the StickS3 firmware with ESP-IDF v5.5.1 and uploads firmware artifacts to Aliyun OSS:
 
@@ -275,7 +278,7 @@ Fields:
 | `side_enter` | Whether the side button sends Return after a manual paste; mutually exclusive with `auto_enter` |
 | `side_delete` | Whether each idle side-button click sends one Backspace; mutually exclusive with `side_restore_last_input` |
 | `side_restore_last_input` | Whether an idle side-button click restores the most recent input; mutually exclusive with `side_delete` |
-| `primary_enter` | Whether the front button sends Return after a manual paste; mutually exclusive with `auto_enter`, `side_enter`, and click-to-talk |
+| `primary_enter` | Whether each idle short front-button press sends Return; mutually exclusive with `auto_enter`, `side_enter`, and click-to-talk |
 | `debug_audio_cache` | Whether to save debug Ogg Opus files |
 | `debug_audio_dir` | Debug audio output directory |
 | `[output].target` | `focused_app` or `subtitle` |

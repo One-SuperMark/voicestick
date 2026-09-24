@@ -151,8 +151,9 @@ final class VoiceStickCoordinator {
     private var sentFinalAudioChunk = false
     private var pastedFinalText = false
     private var pendingSecondaryReturn = false
-    private var pendingPrimaryReturn = false
     // The primary button is shared by push-to-talk and optional Return sending.
+    // When primary Return is enabled, every idle short press sends Return; it
+    // never depends on a previous recording or pasted recognition result.
     // Delay recording briefly so a tap can submit without showing a recording UI.
     // Physical button-up events can arrive noticeably after a human's click.
     // Keep this comfortably above an ordinary click so a submit never flashes
@@ -163,6 +164,9 @@ final class VoiceStickCoordinator {
     private var primaryReturnCandidateStartedAt: Date?
     private var primaryReturnCandidateFrames: [AudioFrame] = []
     private var primaryReturnStartWorkItem: DispatchWorkItem?
+    // Some firmware revisions report button_up and then a matching button_click.
+    // Suppress that one trailing click after button_up already sent Return.
+    private var suppressedPrimaryClickPeripheralID: UUID?
     // A BLE button-up can arrive after the local hold timer. Keep the
     // candidate until that event supplies the firmware-measured duration.
     private var primaryReturnDeferredToRecording = false
@@ -455,7 +459,7 @@ final class VoiceStickCoordinator {
 
     private func handleButtonDown(_ event: StateEvent, peripheralID: UUID) {
         NSLog("Button down button=\(event.button ?? "nil") dev=VS-\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil")")
-        DiagnosticLog.write("button_down button=\(event.button ?? "nil") device=\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil") pending_return=\(pendingPrimaryReturn) main_state=\(mainInputState.isBusy ? "busy" : "ready")")
+        DiagnosticLog.write("button_down button=\(event.button ?? "nil") device=\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil") primary_enter=\(config.primaryEnter) main_state=\(mainInputState.isBusy ? "busy" : "ready")")
         switch event.button {
         case "primary":
             handlePrimaryButtonDown(sessionID: event.sessionID, peripheralID: peripheralID)
@@ -481,23 +485,24 @@ final class VoiceStickCoordinator {
 
     private func handleButtonClick(_ event: StateEvent, peripheralID: UUID) {
         NSLog("Button click button=\(event.button ?? "nil") dev=VS-\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil") duration_ms=\(event.durationMs.map(String.init) ?? "nil")")
-        DiagnosticLog.write("button_click button=\(event.button ?? "nil") device=\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil") duration_ms=\(event.durationMs.map(String.init) ?? "nil") pending_return=\(pendingPrimaryReturn)")
+        DiagnosticLog.write("button_click button=\(event.button ?? "nil") device=\(deviceID(for: peripheralID) ?? "unknown") session=\(event.sessionID.map(String.init) ?? "nil") duration_ms=\(event.durationMs.map(String.init) ?? "nil") primary_enter=\(config.primaryEnter)")
         switch event.button {
         case "primary":
-            // Some firmware revisions emit a click in addition to, or instead
-            // of, a usable button-up event. A pending primary submit always
-            // wins over the normal recording path.
-            if pendingPrimaryReturn,
-               pendingPasteState.isIdle,
-               !mainInputState.isBusy,
-               !isWaitingForFinalText {
-                clearPrimaryReturnCandidate()
-                pendingPrimaryReturn = false
-                inputInjector.pressReturn()
-                ble.sendUIState("ready", to: peripheralID)
+            if handleFrontButtonDuringPendingPaste(peripheralID: peripheralID) {
                 return
             }
-            if handleFrontButtonDuringPendingPaste(peripheralID: peripheralID) {
+            if suppressedPrimaryClickPeripheralID == peripheralID {
+                suppressedPrimaryClickPeripheralID = nil
+                DiagnosticLog.write("front_send_duplicate_click_ignored device=\(deviceID(for: peripheralID) ?? "unknown")")
+                return
+            }
+            // Some firmware revisions emit a click instead of button_up. The
+            // click is still a complete primary-send gesture when idle.
+            if canSendPrimaryReturn() {
+                clearPrimaryReturnCandidate()
+                inputInjector.pressReturn()
+                ble.sendUIState("ready", to: peripheralID)
+                DiagnosticLog.write("front_send_return device=\(deviceID(for: peripheralID) ?? "unknown") source=button_click")
                 return
             }
             guard config.interactionMode == .clickToTalk else {
@@ -557,14 +562,11 @@ final class VoiceStickCoordinator {
             handleSubtitlePrimaryButtonDown(sessionID: sessionID, peripheralID: peripheralID)
             return
         }
-        if pendingPrimaryReturn,
-           pendingPasteState.isIdle,
-           !mainInputState.isBusy,
-           !isWaitingForFinalText {
-            beginPrimaryReturnGesture(sessionID: sessionID, peripheralID: peripheralID)
+        if handleFrontButtonDuringPendingPaste(peripheralID: peripheralID) {
             return
         }
-        if handleFrontButtonDuringPendingPaste(peripheralID: peripheralID) {
+        if canSendPrimaryReturn() {
+            beginPrimaryReturnGesture(sessionID: sessionID, peripheralID: peripheralID)
             return
         }
         if mainInputState.isBusy {
@@ -585,8 +587,16 @@ final class VoiceStickCoordinator {
         beginPrimaryRecording(sessionID: sessionID, peripheralID: peripheralID)
     }
 
+    private func canSendPrimaryReturn() -> Bool {
+        config.primaryEnter &&
+            pendingPasteState.isIdle &&
+            !mainInputState.isBusy &&
+            !isWaitingForFinalText
+    }
+
     private func beginPrimaryReturnGesture(sessionID: UInt32?, peripheralID: UUID) {
         clearPrimaryReturnCandidate()
+        suppressedPrimaryClickPeripheralID = nil
         primaryReturnCandidatePeripheralID = peripheralID
         primaryReturnCandidateSessionID = sessionID
         primaryReturnCandidateStartedAt = Date()
@@ -624,14 +634,12 @@ final class VoiceStickCoordinator {
         primaryReturnCandidateFrames.removeAll(keepingCapacity: true)
         primaryReturnDeferredToRecording = true
         guard let sessionID, sessionID != 0, let startedAt else {
-            pendingPrimaryReturn = false
             return
         }
         beginPrimaryRecording(
             sessionID: sessionID,
             peripheralID: peripheralID,
-            startedAt: startedAt,
-            preservePrimaryReturnCandidate: true
+            startedAt: startedAt
         )
         for frame in bufferedFrames {
             handleAudioFrame(frame, peripheralID: peripheralID)
@@ -641,8 +649,7 @@ final class VoiceStickCoordinator {
     private func beginPrimaryRecording(
         sessionID: UInt32,
         peripheralID: UUID,
-        startedAt: Date = Date(),
-        preservePrimaryReturnCandidate: Bool = false
+        startedAt: Date = Date()
     ) {
         cancelAudioFrameInactivityTimeout()
         mainInputState = .recording(sessionID: sessionID, peripheralID: peripheralID, startedAt: startedAt)
@@ -654,9 +661,6 @@ final class VoiceStickCoordinator {
         sentFinalAudioChunk = false
         pastedFinalText = false
         pendingSecondaryReturn = false
-        if !preservePrimaryReturnCandidate {
-            pendingPrimaryReturn = false
-        }
         pendingPasteState = .idle
         isShowingASRError = false
         oggMuxer.reset()
@@ -678,12 +682,12 @@ final class VoiceStickCoordinator {
             if duration < primaryReturnTapDuration {
                 let recordingAlreadyStarted = primaryReturnDeferredToRecording
                 clearPrimaryReturnCandidate()
-                pendingPrimaryReturn = false
                 if recordingAlreadyStarted {
                     cancelShortRecording()
                 }
                 inputInjector.pressReturn()
                 ble.sendUIState("ready", to: peripheralID)
+                suppressedPrimaryClickPeripheralID = peripheralID
                 DiagnosticLog.write("front_send_return device=\(deviceID(for: peripheralID) ?? "unknown") duration_ms=\(Int(duration * 1_000)) source=button_up recording_started=\(recordingAlreadyStarted)")
                 return
             }
@@ -1375,7 +1379,6 @@ final class VoiceStickCoordinator {
         cancelAudioFrameInactivityTimeout()
         asr.cancel()
         pendingSecondaryReturn = false
-        pendingPrimaryReturn = false
         pendingPasteState = .idle
         debugAudioRecorder.discard()
         isShowingASRError = true
@@ -1436,7 +1439,6 @@ final class VoiceStickCoordinator {
     private func completePendingPaste(text: String) {
         let shouldPressEnter = config.autoEnter
         pendingSecondaryReturn = config.sideEnter
-        pendingPrimaryReturn = config.primaryEnter
         pendingPasteState = .idle
         finishRecognitionCycle()
         statusController.setStatus("Ready")

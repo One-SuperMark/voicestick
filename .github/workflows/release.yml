@@ -22,6 +22,7 @@ concurrency:
 jobs:
   build-firmware:
     name: Build StickS3 Firmware
+    if: github.repository == '78/voicestick'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -141,6 +142,7 @@ jobs:
 
   build-macos:
     name: Build macOS Release
+    if: github.repository == '78/voicestick'
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -243,6 +245,7 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
+    if: github.repository == '78/voicestick'
     needs: [build-firmware, build-macos]
     runs-on: ubuntu-latest
     outputs:
@@ -292,6 +295,7 @@ jobs:
 
   request-website-deploy:
     name: Request Website Deploy
+    if: github.repository == '78/voicestick'
     needs: [build-macos, publish-release]
     runs-on: ubuntu-latest
     steps:

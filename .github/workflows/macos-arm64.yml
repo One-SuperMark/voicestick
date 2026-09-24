@@ -1,0 +1,77 @@
+name: macOS ARM64 Package
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+      - desktop/macos/**
+      - scripts/build-macos.sh
+      - scripts/make-dmg.sh
+      - .github/workflows/macos-arm64.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Build ARM64 test package
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate committed desktop version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error ::VERSION must be a four-part numeric release version."
+            exit 1
+          fi
+          plist=desktop/macos/Sources/VoiceStickApp/Info.plist
+          short_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
+          bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
+          if [[ "$version" != "$short_version" || "$version" != "$bundle_version" ]]; then
+            echo "::error ::VERSION and macOS Info.plist do not match."
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build ARM64 app and DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/build-macos.sh --release
+          scripts/make-dmg.sh
+
+      - name: Verify package and stage artifacts
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          app="build/VoiceStick-${VERSION}.app"
+          executable="$app/Contents/MacOS/VoiceStickApp"
+          test "$(lipo -archs "$executable")" = arm64
+          codesign --verify --deep --strict --verbose=2 "$app"
+          hdiutil verify "build/VoiceStick-${VERSION}.dmg"
+          mkdir -p dist
+          cp "build/VoiceStick-${VERSION}.dmg" dist/
+          cp "build/VoiceStick-${VERSION}.zip" dist/
+          (cd dist && shasum -a 256 "VoiceStick-${VERSION}.dmg" "VoiceStick-${VERSION}.zip" > SHA256SUMS)
+
+      - name: Upload test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceStick-${{ steps.version.outputs.value }}-macOS-arm64-test
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

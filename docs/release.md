@@ -1,5 +1,17 @@
 # VoiceStick Release Process
 
+## One-SuperMark fork: macOS ARM64 cloud package
+
+For a user-facing desktop change, finish the local source review and set both `VERSION` and `desktop/macos/Sources/VoiceStickApp/Info.plist` to the same four-number version. Increase the fourth number once when committing the change; for example, `0.3.4.7.a` becomes `0.3.4.8`. Commit and push `main` without rebuilding, replacing, or launching the local app.
+
+The `macOS ARM64 Package` workflow in `.github/workflows/macos-arm64.yml` runs when `main` receives a desktop/version/build-script change. It can also be started manually from the Actions tab. It checks the committed version, builds an ARM64-only app, packages a DMG and ZIP, verifies the app signature and DMG integrity, and uploads them as a 14-day Actions artifact. Check the run result and download the `VoiceStick-<version>-macOS-arm64-test` artifact from that run. A successful cloud build does not mean the downloaded app has been installed or launched on the user's Mac.
+
+This fork workflow is a **test-package path**, not a public update feed: a clean GitHub runner without Apple credentials produces an ad-hoc signed, unnotarized package. Do not treat it as a Developer ID release or auto-update package. It does not change `firmware/version.txt`, build or upload StickS3 firmware, publish a GitHub Release, update the website, or touch the local `/Applications/VoiceStick.app`. Firmware versions are changed only when preparing a firmware flash/release, independently from desktop commits. Formal distribution requires a separate Developer ID signing, notarization, Sparkle signing, and fork-specific update-feed setup before publishing.
+
+The original multi-platform workflow `.github/workflows/release.yml` is restricted to `78/voicestick`. A `v<version>` tag in the One-SuperMark fork does not run its firmware/OSS publishing path.
+
+## Original upstream multi-platform release flow
+
 VoiceStick releases have three moving parts:
 
 - macOS app: built, signed, notarized, and uploaded by GitHub Actions.
@@ -24,7 +36,7 @@ firmware/version.txt
 
 `VERSION` is used by the desktop packaging scripts and the GitHub release workflow. `firmware/version.txt` is the firmware version reported by the device, so it must match the release version for OTA update detection to work correctly.
 
-VoiceStick uses `上游 Fork 基线.本地子版本.调试字母序号` as its five-part local debug-install version scheme.  For example, after `0.3.4.3`, the first debug deployment is `0.3.4.3.a`, then `0.3.4.3.b`.  Before each commit and push, convert the version back to four numeric components and increase the fourth one: `0.3.4.3.a` becomes `0.3.4.4`.  Build, sign, exit the old app, and launch the new ARM64 app before committing and pushing.  Linux CMake and Windows resource metadata consume the first four numeric components, while app/package display uses the full version.
+The fork's five-part debug version is not used for this upstream tag-based flow; its fork commit and cloud-package rules are described above. Linux CMake and Windows resource metadata consume the first four numeric components.
 
 For release `0.2.4`, the tag must be:
 
