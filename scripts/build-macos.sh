@@ -37,8 +37,15 @@ case "$CONFIG" in
         ;;
 esac
 
-if [ -z "$VERSION" ]; then
-    echo "Error: VERSION is empty"
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Error: VERSION must contain exactly three numeric components."
+    exit 1
+fi
+
+SHORT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")"
+BUNDLE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")"
+if [ "$SHORT_VERSION" != "$VERSION" ] || [ "$BUNDLE_VERSION" != "$VERSION" ]; then
+    echo "Error: VERSION and both macOS bundle version fields must match."
     exit 1
 fi
 
@@ -48,9 +55,6 @@ echo "===================================="
 echo " VoiceStick macOS Build v$VERSION"
 echo " Architecture: $TARGET_ARCH"
 echo "===================================="
-
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$PLIST"
 
 if [ -n "${VOICESTICK_APPCAST_URL:-}" ]; then
     /usr/libexec/PlistBuddy -c "Set :SUFeedURL $VOICESTICK_APPCAST_URL" "$PLIST"
@@ -112,16 +116,34 @@ SPARKLE_FRAMEWORK="$ARM_BUILD/Sparkle.framework"
 if [ ! -d "$SPARKLE_FRAMEWORK" ]; then
     SPARKLE_FRAMEWORK="$(find -L "$DESKTOP_DIR/.build-arm64/artifacts" -name Sparkle.framework -type d 2>/dev/null | head -1 || true)"
 fi
-if [ -n "$SPARKLE_FRAMEWORK" ]; then
-    cp -R "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/"
-    install_name_tool -add_rpath "@loader_path/../Frameworks" "$APP_DIR/Contents/MacOS/VoiceStickApp" 2>/dev/null || true
-else
-    echo "WARNING: Sparkle.framework was not found in SwiftPM artifacts."
+if [ -z "$SPARKLE_FRAMEWORK" ] || [ ! -d "$SPARKLE_FRAMEWORK" ]; then
+    echo "Error: required Sparkle.framework was not found in SwiftPM artifacts."
+    exit 1
+fi
+cp -R "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/"
+if [ ! -f "$APP_DIR/Contents/Frameworks/Sparkle.framework/Sparkle" ]; then
+    echo "Error: packaged Sparkle executable is missing."
+    exit 1
+fi
+
+EXECUTABLE="$APP_DIR/Contents/MacOS/VoiceStickApp"
+RPATH_LIST="$(otool -l "$EXECUTABLE")"
+if [[ "$RPATH_LIST" != *'path @loader_path/../Frameworks ('* ]]; then
+    install_name_tool -add_rpath "@loader_path/../Frameworks" "$EXECUTABLE"
+    RPATH_LIST="$(otool -l "$EXECUTABLE")"
+fi
+if [[ "$RPATH_LIST" != *'path @loader_path/../Frameworks ('* ]]; then
+    echo "Error: packaged executable cannot locate its embedded frameworks."
+    exit 1
 fi
 
 CODESIGN_IDENTITY="-"
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
     CODESIGN_IDENTITY="$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')"
+fi
+if [ "${REQUIRE_DEVELOPER_ID:-0}" = "1" ] && [ "$CODESIGN_IDENTITY" = "-" ]; then
+    echo "Error: a Developer ID Application signing identity is required."
+    exit 1
 fi
 
 echo ""
@@ -130,10 +152,10 @@ xattr -cr "$APP_DIR" 2>/dev/null || true
 if [ "$CODESIGN_IDENTITY" != "-" ]; then
     echo "Using: $CODESIGN_IDENTITY"
     if [ -d "$APP_DIR/Contents/Frameworks/Sparkle.framework" ]; then
-        codesign --deep --force --options runtime --sign "$CODESIGN_IDENTITY" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
+        codesign --deep --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
     fi
-    codesign --force --options runtime --sign "$CODESIGN_IDENTITY" "$APP_DIR/Contents/MacOS/VoiceStickApp"
-    codesign --force --options runtime --sign "$CODESIGN_IDENTITY" "$APP_DIR"
+    codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP_DIR/Contents/MacOS/VoiceStickApp"
+    codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP_DIR"
 else
     echo "Using ad-hoc signature."
     codesign --force --sign - "$APP_DIR/Contents/MacOS/VoiceStickApp"

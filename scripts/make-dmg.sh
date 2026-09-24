@@ -26,18 +26,12 @@ CODESIGN_IDENTITY="-"
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
     CODESIGN_IDENTITY="$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')"
 fi
-
-echo "Signing app before DMG packaging..."
-xattr -cr "$APP_PATH" 2>/dev/null || true
-if [ "$CODESIGN_IDENTITY" != "-" ]; then
-    echo "Using: $CODESIGN_IDENTITY"
-    codesign --deep --force --options runtime --sign "$CODESIGN_IDENTITY" "$APP_PATH"
-else
-    echo "Using ad-hoc signature."
-    codesign --deep --force --options runtime --sign - "$APP_PATH"
+if [ "${REQUIRE_DEVELOPER_ID:-0}" = "1" ] && [ "$CODESIGN_IDENTITY" = "-" ]; then
+    echo "Error: a Developer ID Application signing identity is required."
+    exit 1
 fi
 
-echo "Verifying app signature..."
+echo "Verifying the previously signed app..."
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
 rm -rf "$STAGING_DIR" "$OUTPUT"
@@ -54,11 +48,25 @@ hdiutil create \
     "$OUTPUT"
 rm -rf "$STAGING_DIR"
 
-if xcrun notarytool history --keychain-profile "AC_PASSWORD" >/dev/null 2>&1; then
+if [ "$CODESIGN_IDENTITY" != "-" ]; then
+    echo "Signing DMG with Developer ID..."
+    codesign --force --timestamp --sign "$CODESIGN_IDENTITY" "$OUTPUT"
+    codesign --verify --verbose=2 "$OUTPUT"
+fi
+
+NOTARY_OPTIONS=(--keychain-profile "AC_PASSWORD")
+if [ -n "${NOTARY_KEYCHAIN_PATH:-}" ]; then
+    NOTARY_OPTIONS+=(--keychain "$NOTARY_KEYCHAIN_PATH")
+fi
+if xcrun notarytool history "${NOTARY_OPTIONS[@]}" >/dev/null 2>&1; then
     echo "Submitting DMG for notarization..."
-    xcrun notarytool submit "$OUTPUT" --keychain-profile "AC_PASSWORD" --wait
+    xcrun notarytool submit "$OUTPUT" "${NOTARY_OPTIONS[@]}" --wait
     xcrun stapler staple "$OUTPUT"
 else
+    if [ "${REQUIRE_NOTARIZATION:-0}" = "1" ]; then
+        echo "Error: notarization profile AC_PASSWORD is required."
+        exit 1
+    fi
     echo "Skipping notarization: keychain profile AC_PASSWORD was not found."
 fi
 

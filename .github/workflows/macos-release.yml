@@ -1,0 +1,211 @@
+name: macOS ARM64 Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Sign and notarize macOS ARM64
+    if: github.repository == 'One-SuperMark/voicestick'
+    runs-on: macos-15
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release tag and version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo '::error ::VERSION must have three numeric components.'
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo '::error ::Release tag does not match VERSION.'
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo '::error ::Release tag must point to a commit on main.'
+            exit 1
+          fi
+          plist=desktop/macos/Sources/VoiceStickApp/Info.plist
+          short_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
+          bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
+          if [[ "$short_version" != "$version" || "$bundle_version" != "$version" ]]; then
+            echo '::error ::macOS bundle versions must match VERSION.'
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Require signing and notarization secrets
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for secret_name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [[ -z "${!secret_name:-}" ]]; then
+              echo "::error ::Missing required Actions secret: $secret_name"
+              exit 1
+            fi
+          done
+
+      - name: Import Developer ID certificate
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/voicestick-developer-id.p12"
+          keychain_path="$RUNNER_TEMP/voicestick-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          trap 'rm -f "$certificate_path"' EXIT
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 -D > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          if ! security find-identity -v -p codesigning "$keychain_path" | grep -q 'Developer ID Application'; then
+            echo '::error ::Imported certificate is not a valid Developer ID Application identity.'
+            exit 1
+          fi
+
+      - name: Configure Apple notarization
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain_path="$RUNNER_TEMP/voicestick-signing.keychain-db"
+          xcrun notarytool store-credentials AC_PASSWORD \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --keychain "$keychain_path" \
+            --validate
+          xcrun notarytool history --keychain-profile AC_PASSWORD --keychain "$keychain_path" >/dev/null
+
+      - name: Build signed ARM64 app
+        shell: bash
+        env:
+          REQUIRE_DEVELOPER_ID: '1'
+        run: scripts/build-macos.sh --release
+
+      - name: Create notarized DMG
+        shell: bash
+        env:
+          REQUIRE_DEVELOPER_ID: '1'
+          REQUIRE_NOTARIZATION: '1'
+          NOTARY_KEYCHAIN_PATH: ${{ runner.temp }}/voicestick-signing.keychain-db
+        run: scripts/make-dmg.sh
+
+      - name: Verify release package and checksums
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          dmg="build/VoiceStick-${VERSION}.dmg"
+          mount_path="$RUNNER_TEMP/voicestick-release-mount"
+          mkdir -p "$mount_path"
+          test -s "$dmg"
+          hdiutil verify "$dmg"
+          xcrun stapler validate -v "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+          hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mount_path" "$dmg"
+          trap 'hdiutil detach -quiet "$mount_path" || true' EXIT
+          app="$mount_path/VoiceStick.app"
+          test -d "$app"
+          executable="$app/Contents/MacOS/VoiceStickApp"
+          test "$(lipo -archs "$executable")" = arm64
+          test -f "$app/Contents/Frameworks/Sparkle.framework/Sparkle"
+          otool -L "$executable" | grep -F '@rpath/Sparkle.framework/' >/dev/null
+          otool -l "$executable" | grep -F 'path @loader_path/../Frameworks (' >/dev/null
+          for key in CFBundleShortVersionString CFBundleVersion; do
+            actual="$(/usr/libexec/PlistBuddy -c "Print :$key" "$app/Contents/Info.plist")"
+            if [[ "$actual" != "$VERSION" ]]; then
+              echo "::error ::Packaged $key does not match VERSION."
+              exit 1
+            fi
+          done
+          codesign --verify --deep --strict --verbose=2 "$app"
+          signature="$(codesign -dv --verbose=4 "$app" 2>&1)"
+          if [[ "$signature" != *'Authority=Developer ID Application:'* || "$signature" != *"TeamIdentifier=$APPLE_TEAM_ID"* || "$signature" != *'Timestamp='* || "$signature" != *'runtime'* ]]; then
+            echo '::error ::App is missing the expected Developer ID team, hardened runtime or secure timestamp.'
+            exit 1
+          fi
+          if [[ "$signature" == *'Timestamp=none'* ]]; then
+            echo '::error ::App does not have a secure signing timestamp.'
+            exit 1
+          fi
+          mkdir -p dist
+          cp "$dmg" "dist/VoiceStick-${VERSION}.dmg"
+          (cd dist && shasum -a 256 "VoiceStick-${VERSION}.dmg" > SHA256SUMS)
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+
+      - name: Upload verified release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceStick-${{ steps.version.outputs.value }}-macOS-arm64-release
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release package
+        uses: actions/download-artifact@v4
+        with:
+          name: VoiceStick-${{ needs.package.outputs.version }}-macOS-arm64-release
+          path: dist
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -c SHA256SUMS)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo '::error ::A GitHub Release already exists for this tag.'
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/VoiceStick-${VERSION}.dmg" \
+            dist/SHA256SUMS \
+            --title "VoiceStick $VERSION" \
+            --generate-notes \
+            --verify-tag

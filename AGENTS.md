@@ -5,7 +5,7 @@
 - 本仓库是 Voice Stick：M5Stack StickS3 蓝牙按键语音输入固件与 macOS 客户端。
 - 未提交的工作区改动不代表已经发布、安装到 macOS、烧录到设备或完成真实硬件验收。
 - Git 提交信息使用中文；只暂存当前任务负责的文件或具体差异，默认不推送。
-- 调试安装使用五段式“上游 Fork 基线.本地子版本.调试字母序号”，例如基线 `0.3.4` 的第三个本地修改的首个调试安装为 `0.3.4.3.a`，后续调试安装依次为 `0.3.4.3.b`、`0.3.4.3.c`。每次提交并推送包含面向用户的功能更新的代码前，必须把根目录 `VERSION` 与 macOS `Info.plist` 收敛为四段数值版本，并将第四段加一；例如调试基线 `0.3.4.3.a` 提交时调整为 `0.3.4.4`。提交前只做静态检查，不在本地重新打包、替换或启动应用；推送 `main` 后由 `macOS ARM64 Package` GitHub Actions 构建，检查云端任务与产物。未提交的工作区调整不得单独提升四段正式版本号；仅允许更新第五段调试字母并以本地安装形式验收，不能表述为正式发布。云端测试包未经过 Developer ID 签名、公证，也未自动安装到本机，不能表述为正式分发或本机运行版本。
+- 正式桌面版本统一使用 Apple 兼容的三段数值版本号 `主版本.次版本.修订号`。根目录 `VERSION`、macOS `Info.plist` 的 `CFBundleShortVersionString` 与 `CFBundleVersion`、菜单显示和正式标签 `v<VERSION>` 必须一致；从旧版 `0.3.4.8` 迁移后的下一版为 `0.3.5`。每次提交并推送包含面向用户的功能更新的代码前，将第三段加一。调试构建若需区分轮次，只在产物名称或记录中添加调试字母，不写入 Apple 版本字段，也不将调试构建表述为正式发布。提交前只做静态检查，不在本地重新打包、替换或启动应用；推送 `main` 后由 `macOS ARM64 Package` GitHub Actions 构建测试包，检查云端任务与产物。测试包未经过 Developer ID 签名、公证，也未自动安装到本机，不能表述为正式分发或本机运行版本。正式发布另由 fork 的 macOS 发布工作流在匹配的版本标签上完成签名、公证和 GitHub Release，不触发固件发布。
 - 重构或更新安装流程必须先按 `/Applications/VoiceStick.app/Contents/MacOS/VoiceStickApp` 可执行进程确认旧版已退出，验证新包签名与可启动性后再启动新版本，并在交付时报告实际运行的版本与架构。`/Applications` 只保留当前 `VoiceStick.app`，不得保存本地备份；如需可恢复备份，放入仓库 `build/local-app-backups/`。
 - 本机已配置 `Developer ID Application: Zhejiang Zhongwei Safety Technology Co., LTD (322V86ZQ9K)`；后续本地安装和发布优先使用此固定身份签名，不得在可用时回退到 ad-hoc 签名。
 
