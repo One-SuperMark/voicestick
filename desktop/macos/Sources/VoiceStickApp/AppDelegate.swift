@@ -1,6 +1,12 @@
 import AppKit
+import Sparkle
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
     private var statusController: StatusController?
     private var coordinator: VoiceStickCoordinator?
     private var settingsWindowController: SettingsWindowController?
@@ -91,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startApp(config: AppConfig) {
         self.config = config
         let statusController = StatusController(
+            updaterController: updaterController,
             pairedDeviceIDs: config.pairedDeviceIDs,
             deviceThemeColors: config.deviceThemeColors,
             deviceOverlayPositions: config.deviceOverlayPositions,

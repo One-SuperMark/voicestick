@@ -1,4 +1,5 @@
 import AppKit
+import Sparkle
 
 final class StatusController {
     private enum AppStatus {
@@ -81,6 +82,7 @@ final class StatusController {
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
+    private let updaterController: SPUStandardUpdaterController
     private var overlays: [String: OverlayController] = [:]
     private var visibleOverlayKeys: Set<String> = []
 
@@ -117,7 +119,8 @@ final class StatusController {
     private var defaultOutputProfile: OutputProfile
     private var deviceOutputProfiles: [String: OutputProfile]
 
-    init(pairedDeviceIDs: [String] = [],
+    init(updaterController: SPUStandardUpdaterController,
+         pairedDeviceIDs: [String] = [],
          deviceThemeColors: [String: OverlayThemeColor] = [:],
          deviceOverlayPositions: [String: OverlayPosition] = [:],
          interactionMode: InteractionMode = .holdToTalk,
@@ -128,6 +131,7 @@ final class StatusController {
          primaryEnter: Bool = false,
          defaultOutputProfile: OutputProfile = .default,
          deviceOutputProfiles: [String: OutputProfile] = [:]) {
+        self.updaterController = updaterController
         self.pairedDeviceIDs = pairedDeviceIDs
         self.deviceThemeColors = deviceThemeColors
         self.deviceOverlayPositions = deviceOverlayPositions
@@ -244,6 +248,19 @@ final class StatusController {
             symbolName: "accessibility",
             action: #selector(openAccessibilitySettings)
         ))
+
+        menu.addItem(NSMenuItem.separator())
+        let checkForUpdatesItem = NSMenuItem(
+            title: "检查更新…",
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        checkForUpdatesItem.target = updaterController
+        checkForUpdatesItem.image = Self.symbolImage(
+            named: "arrow.triangle.2.circlepath",
+            accessibilityDescription: checkForUpdatesItem.title
+        )
+        menu.addItem(checkForUpdatesItem)
 
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
         let versionItem = NSMenuItem(title: "当前版本：\(version)", action: nil, keyEquivalent: "")

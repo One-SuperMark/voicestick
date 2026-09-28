@@ -141,14 +141,14 @@ swift run VoiceStickApp
 
 The app is a menu bar accessory app and requests Bluetooth permission. Text insertion uses simulated `Command-V` plus optional Return. If macOS blocks the keyboard events, grant Accessibility permission to the running terminal or app in System Settings.
 
-For a distributable macOS release with Sparkle updates:
+For a local ARM64 macOS package (not a public signed update):
 
 ```sh
-SPARKLE_PUBLIC_ED_KEY="..." scripts/build-macos.sh --release
+scripts/build-macos.sh --release
 scripts/make-dmg.sh
 ```
 
-The build script writes an ARM64-only `build/VoiceStick-<version>.app` and ZIP. It writes a Sparkle signature only when signing keys are available. A public release additionally needs Developer ID signing, notarization, and a matching update feed.
+The build script writes an ARM64-only `build/VoiceStick-<version>.app` and ZIP. The fork's public release workflow signs and notarizes its DMG, then signs that final DMG and its Sparkle appcast with the fork's own update key. Local packages are not added to the public update feed.
 
 For a distributable Windows release with WinSparkle updates, the MSI is the update package. The Windows signing certificate is expected to live on the local signing machine, such as a USB hardware key:
 
@@ -174,9 +174,11 @@ desktop/linux/build/VoiceStick
 
 Config is `~/.config/voicestick/config.toml`. Text is copied with GTK, then VoiceStick tries AT-SPI insert. If that fails, it uses the GNOME Remote Desktop portal to inject Ctrl+V. See `desktop/linux/README.md`.
 
-In the One-SuperMark fork, commit a three-number desktop version in `VERSION` and both macOS `Info.plist` version fields, then push `main`. The `macOS ARM64 Package` GitHub Action builds an ARM64 DMG and ZIP as downloadable test artifacts; local repackaging is not required. This path does not publish a GitHub Release, update the running app, or build firmware. Without Apple signing credentials on GitHub, its package is ad-hoc signed and not notarized. A matching `v<VERSION>` tag starts the separate fork macOS release workflow, which requires Developer ID signing and Apple notarization before it publishes a DMG. It does not publish firmware or enable in-app auto-updates. See `docs/release.md` for the fork workflows and their verification boundaries.
+In the One-SuperMark fork, commit a three-number desktop version in `VERSION` and both macOS `Info.plist` version fields, then push `main`. The `macOS ARM64 Package` GitHub Action builds an ARM64 DMG and ZIP as downloadable test artifacts; local repackaging is not required. This path does not publish a GitHub Release, update the running app, or build firmware. Without Apple signing credentials on GitHub, its package is ad-hoc signed and not notarized. A matching `v<VERSION>` tag starts the separate fork macOS release workflow, which requires Developer ID signing, Apple notarization, and a separate Sparkle signing key before it publishes the DMG and signed appcast. It does not publish firmware or install the new app locally. The already published `v0.3.5` cannot update itself; the first release with the updater must be installed manually. See `docs/release.md` for the fork workflows and their verification boundaries.
 
 The original multi-platform `Release Build` workflow is guarded to run only in `78/voicestick`; its firmware/OSS and website deployment steps do not run in this fork. The following firmware deployment details describe that original workflow, not the fork's desktop package action.
+
+Each formal fork release keeps its actual Chinese changes in `docs/releases/<VERSION>.md`. The same announcement is shown on GitHub and in the signed in-app update feed.
 
 The same release workflow also builds the StickS3 firmware with ESP-IDF v5.5.1 and uploads firmware artifacts to Aliyun OSS:
 

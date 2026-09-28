@@ -52,6 +52,20 @@ jobs:
             echo '::error ::macOS bundle versions must match VERSION.'
             exit 1
           fi
+          feed_url="$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$plist")"
+          public_key="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$plist")"
+          signed_feed="$(/usr/libexec/PlistBuddy -c 'Print :SURequireSignedFeed' "$plist")"
+          verify_before_extraction="$(/usr/libexec/PlistBuddy -c 'Print :SUVerifyUpdateBeforeExtraction' "$plist")"
+          if [[ "$feed_url" != "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml" ||
+                "$public_key" != 'KDSK28HrHhxNv2A87gPhCZJamk4dITg6ZgVdJ0cHup0=' ||
+                "$signed_feed" != true || "$verify_before_extraction" != true ]]; then
+            echo '::error ::macOS Sparkle configuration must use the signed fork update feed.'
+            exit 1
+          fi
+          if [[ ! -s "docs/releases/$version.md" ]]; then
+            echo '::error ::A version-specific Chinese release announcement is required.'
+            exit 1
+          fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
       - name: Require signing and notarization secrets
@@ -62,9 +76,10 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
         run: |
           set -euo pipefail
-          for secret_name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+          for secret_name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD SPARKLE_PRIVATE_ED_KEY; do
             if [[ -z "${!secret_name:-}" ]]; then
               echo "::error ::Missing required Actions secret: $secret_name"
               exit 1
@@ -125,7 +140,7 @@ jobs:
           NOTARY_KEYCHAIN_PATH: ${{ runner.temp }}/voicestick-signing.keychain-db
         run: scripts/make-dmg.sh
 
-      - name: Verify release package and checksums
+      - name: Verify notarized release package
         shell: bash
         env:
           VERSION: ${{ steps.version.outputs.value }}
@@ -155,6 +170,14 @@ jobs:
               exit 1
             fi
           done
+          for key in SUFeedURL SUPublicEDKey SURequireSignedFeed SUVerifyUpdateBeforeExtraction; do
+            actual="$(/usr/libexec/PlistBuddy -c "Print :$key" "$app/Contents/Info.plist")"
+            expected="$(/usr/libexec/PlistBuddy -c "Print :$key" desktop/macos/Sources/VoiceStickApp/Info.plist)"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error ::Packaged $key does not match committed Sparkle configuration."
+              exit 1
+            fi
+          done
           codesign --verify --deep --strict --verbose=2 "$app"
           signature="$(codesign -dv --verbose=4 "$app" 2>&1)"
           if [[ "$signature" != *'Authority=Developer ID Application:'* || "$signature" != *"TeamIdentifier=$APPLE_TEAM_ID"* || "$signature" != *'Timestamp='* || "$signature" != *'runtime'* ]]; then
@@ -167,7 +190,44 @@ jobs:
           fi
           mkdir -p dist
           cp "$dmg" "dist/VoiceStick-${VERSION}.dmg"
-          (cd dist && shasum -a 256 "VoiceStick-${VERSION}.dmg" > SHA256SUMS)
+
+      - name: Sign Sparkle update and appcast
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          set -euo pipefail
+          sign_tool="$(find -L desktop/macos/.build-arm64 desktop/macos/.build \
+            -type f -path '*/Sparkle/bin/sign_update' -print -quit 2>/dev/null || true)"
+          dmg="dist/VoiceStick-${VERSION}.dmg"
+          test -n "$sign_tool"
+          test -x "$sign_tool"
+          test -s "$dmg"
+          derived_public_key="$(printf '%s' "$SPARKLE_PRIVATE_ED_KEY" | swift scripts/derive-sparkle-public-key.swift)"
+          packaged_public_key="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "build/VoiceStick-${VERSION}.app/Contents/Info.plist")"
+          if [[ "$derived_public_key" != "$packaged_public_key" ]]; then
+            echo '::error ::Sparkle signing key does not match the packaged app public key.'
+            exit 1
+          fi
+          signature="$(printf '%s' "$SPARKLE_PRIVATE_ED_KEY" | "$sign_tool" --ed-key-file - -p "$dmg")"
+          test -n "$signature"
+          printf '%s' "$SPARKLE_PRIVATE_ED_KEY" | "$sign_tool" --ed-key-file - --verify "$dmg" "$signature" >/dev/null
+          cp "docs/releases/${VERSION}.md" dist/release-notes.md
+          python3 scripts/update-appcast.py \
+            --version "$VERSION" \
+            --macos-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/VoiceStick-${VERSION}.dmg" \
+            --signature "$signature" \
+            --length "$(stat -f%z "$dmg")" \
+            --feed-url "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml" \
+            --release-url "https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME" \
+            --macos-arch arm64 \
+            --release-notes-file dist/release-notes.md \
+            --output dist/appcast.xml
+          printf '%s' "$SPARKLE_PRIVATE_ED_KEY" | "$sign_tool" --ed-key-file - dist/appcast.xml >/dev/null
+          printf '%s' "$SPARKLE_PRIVATE_ED_KEY" | "$sign_tool" --ed-key-file - --verify dist/appcast.xml >/dev/null
+          xmllint --noout dist/appcast.xml
+          (cd dist && shasum -a 256 "VoiceStick-${VERSION}.dmg" appcast.xml > SHA256SUMS)
           (cd dist && shasum -a 256 -c SHA256SUMS)
 
       - name: Upload verified release package
@@ -199,14 +259,16 @@ jobs:
         run: |
           set -euo pipefail
           (cd dist && sha256sum -c SHA256SUMS)
+          test -s dist/release-notes.md
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo '::error ::A GitHub Release already exists for this tag.'
             exit 1
           fi
           gh release create "$GITHUB_REF_NAME" \
             "dist/VoiceStick-${VERSION}.dmg" \
+            dist/appcast.xml \
             dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --title "VoiceStick $VERSION" \
-            --generate-notes \
+            --notes-file dist/release-notes.md \
             --verify-tag

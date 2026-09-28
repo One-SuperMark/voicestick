@@ -7,10 +7,10 @@
 #   build/VoiceStick-<version>.signature  (when Sparkle sign_update is available)
 #
 # Optional environment:
-#   VOICESTICK_APPCAST_URL=https://78.github.io/voicestick/appcast.xml
+#   VOICESTICK_APPCAST_URL=<HTTPS appcast URL override for this build>
 #   SPARKLE_PUBLIC_ED_KEY=<public key from Sparkle generate_keys>
 #   SPARKLE_PRIVATE_ED_KEY=<private key exported by Sparkle generate_keys -x>
-#   SPARKLE_KEY_ACCOUNT=voicestick
+#   SPARKLE_KEY_ACCOUNT=one-supermark-voicestick
 
 set -euo pipefail
 
@@ -22,7 +22,7 @@ PLIST="$DESKTOP_DIR/Sources/VoiceStickApp/Info.plist"
 VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
 CONFIG="${1:---release}"
 TARGET_ARCH="arm64"
-SPARKLE_KEY_ACCOUNT="${SPARKLE_KEY_ACCOUNT:-voicestick}"
+SPARKLE_KEY_ACCOUNT="${SPARKLE_KEY_ACCOUNT:-one-supermark-voicestick}"
 
 case "$CONFIG" in
     --release)
@@ -56,13 +56,7 @@ echo " VoiceStick macOS Build v$VERSION"
 echo " Architecture: $TARGET_ARCH"
 echo "===================================="
 
-if [ -n "${VOICESTICK_APPCAST_URL:-}" ]; then
-    /usr/libexec/PlistBuddy -c "Set :SUFeedURL $VOICESTICK_APPCAST_URL" "$PLIST"
-fi
-
-if [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
-    /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $SPARKLE_PUBLIC_ED_KEY" "$PLIST"
-elif /usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$PLIST" | grep -q "REPLACE_WITH"; then
+if /usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$PLIST" | grep -q "REPLACE_WITH" && [ -z "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
     echo "WARNING: SUPublicEDKey is still a placeholder."
     echo "         Generate Sparkle keys before shipping a public release."
 fi
@@ -104,6 +98,12 @@ if [ "$(lipo -archs "$APP_DIR/Contents/MacOS/VoiceStickApp")" != "$TARGET_ARCH" 
 fi
 
 cp "$PLIST" "$APP_DIR/Contents/Info.plist"
+if [ -n "${VOICESTICK_APPCAST_URL:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :SUFeedURL $VOICESTICK_APPCAST_URL" "$APP_DIR/Contents/Info.plist"
+fi
+if [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $SPARKLE_PUBLIC_ED_KEY" "$APP_DIR/Contents/Info.plist"
+fi
 
 ICON_PATH="$DESKTOP_DIR/Resources/AppIcon.icns"
 if [ -f "$ICON_PATH" ]; then
