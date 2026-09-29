@@ -1,10 +1,9 @@
 import AppKit
-import Sparkle
 
 final class StatusController {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
-    private let updaterController: SPUStandardUpdaterController
+    private let updateCheckController: UpdateCheckController
     private var overlays: [String: OverlayController] = [:]
     private var visibleOverlayKeys: Set<String> = []
 
@@ -42,7 +41,7 @@ final class StatusController {
     private var defaultOutputProfile: OutputProfile
     private var deviceOutputProfiles: [String: OutputProfile]
 
-    init(updaterController: SPUStandardUpdaterController,
+    init(updateCheckController: UpdateCheckController,
          pairedDeviceIDs: [String] = [],
          deviceThemeColors: [String: OverlayThemeColor] = [:],
          deviceOverlayPositions: [String: OverlayPosition] = [:],
@@ -54,7 +53,7 @@ final class StatusController {
          primaryEnter: Bool = false,
          defaultOutputProfile: OutputProfile = .default,
          deviceOutputProfiles: [String: OutputProfile] = [:]) {
-        self.updaterController = updaterController
+        self.updateCheckController = updateCheckController
         self.pairedDeviceIDs = pairedDeviceIDs
         self.deviceThemeColors = deviceThemeColors
         self.deviceOverlayPositions = deviceOverlayPositions
@@ -185,10 +184,10 @@ final class StatusController {
         menu.addItem(NSMenuItem.separator())
         let checkForUpdatesItem = NSMenuItem(
             title: "检查更新…",
-            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            action: #selector(UpdateCheckController.checkForUpdates(_:)),
             keyEquivalent: ""
         )
-        checkForUpdatesItem.target = updaterController
+        checkForUpdatesItem.target = updateCheckController
         checkForUpdatesItem.image = Self.symbolImage(
             named: "arrow.triangle.2.circlepath",
             accessibilityDescription: checkForUpdatesItem.title

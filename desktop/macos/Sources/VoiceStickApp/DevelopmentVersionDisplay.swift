@@ -4,6 +4,7 @@ import Sparkle
 /// Changes presentation only; Sparkle keeps comparing the three-part CFBundleVersion.
 final class DevelopmentVersionDisplay: NSObject, SPUStandardUserDriverDelegate, SUVersionDisplay {
     private let version: AppVersion
+    var onWillShowUpdateUI: (() -> Void)?
 
     init(version: AppVersion = .current) {
         self.version = version
@@ -12,6 +13,18 @@ final class DevelopmentVersionDisplay: NSObject, SPUStandardUserDriverDelegate, 
 
     func standardUserDriverRequestsVersionDisplayer() -> (any SUVersionDisplay)? {
         version.isDevelopmentBuild ? self : nil
+    }
+
+    func standardUserDriverWillShowModalAlert() {
+        onWillShowUpdateUI?()
+    }
+
+    func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool, forUpdate update: SUAppcastItem, state: SPUUserUpdateState) {
+        if handleShowingUpdate { onWillShowUpdateUI?() }
+    }
+
+    func standardUserDriverWillFinishUpdateSession() {
+        onWillShowUpdateUI?()
     }
 
     func formatUpdateVersion(

@@ -3,6 +3,7 @@ import Sparkle
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let updateVersionDisplay: DevelopmentVersionDisplay
+    private let updateCheckController: UpdateCheckController
     private let updaterController: SPUStandardUpdaterController
     private var statusController: StatusController?
     private var coordinator: VoiceStickCoordinator?
@@ -15,14 +16,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var config = AppConfig.defaults
 
     override init() {
+        let checkController = UpdateCheckController()
+        updateCheckController = checkController
         let versionDisplay = DevelopmentVersionDisplay()
+        versionDisplay.onWillShowUpdateUI = { [weak checkController] in
+            checkController?.finishFeedback()
+        }
         updateVersionDisplay = versionDisplay
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
-            updaterDelegate: nil,
+            updaterDelegate: checkController,
             userDriverDelegate: versionDisplay
         )
         super.init()
+        checkController.bind(to: updaterController)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -105,7 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startApp(config: AppConfig) {
         self.config = config
         let statusController = StatusController(
-            updaterController: updaterController,
+            updateCheckController: updateCheckController,
             pairedDeviceIDs: config.pairedDeviceIDs,
             deviceThemeColors: config.deviceThemeColors,
             deviceOverlayPositions: config.deviceOverlayPositions,
