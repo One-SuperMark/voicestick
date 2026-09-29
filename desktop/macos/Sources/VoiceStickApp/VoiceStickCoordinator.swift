@@ -143,6 +143,14 @@ final class VoiceStickCoordinator {
     private let firmwareManifestCacheDuration: TimeInterval = 24 * 60 * 60
 
     private var mainInputState = MainInputState.ready
+    // Keep the identity independently of BLE's connection cache. It is removed
+    // before the disconnect callback, and old async results must not adopt a new
+    // recording's device or cycle.
+    private var mainCycleToken: UUID?
+    private var mainCyclePeripheralID: UUID?
+    private var mainCycleDeviceID: String?
+    private var retainingDisconnectedFinalResult = false
+    private var connectionEpochs: [String: UUID] = [:]
     private var receivedAudioFrames = 0
     private var hasLoggedFirstAudioFrame = false
     private var previousAudioFrameSequence: UInt32?
@@ -185,6 +193,7 @@ final class VoiceStickCoordinator {
     private var pendingFirmwareUpdatePromptDeviceIDs: Set<String> = []
     private var errorRecoveryToken = 0
     private var isShowingASRError = false
+    private var activeASRErrorCycleToken: UUID?
     private var subtitleCycles: [SubtitleCycleKey: SubtitleCycle] = [:]
     private var activeSubtitleSessions: [UUID: UInt32] = [:]
     var onFirmwareUpdatePrompt: ((String, String, String, Bool) -> Void)?
@@ -205,15 +214,20 @@ final class VoiceStickCoordinator {
     func start() {
         ble.onConnectionChange = { [weak self] connectedDevices in
             guard let self else { return }
+            let connectedDeviceIDs = Set(connectedDevices.map(\.deviceID))
+            for deviceID in self.connectionEpochs.keys.filter({ !connectedDeviceIDs.contains($0) }) {
+                self.connectionEpochs.removeValue(forKey: deviceID)
+                self.subtitleController.hide(deviceID: deviceID)
+            }
+            for deviceID in connectedDeviceIDs where self.connectionEpochs[deviceID] == nil {
+                self.connectionEpochs[deviceID] = UUID()
+            }
             self.statusController.setConnectedDevices(connectedDevices)
             self.cancelActiveCycleIfDeviceDisconnected()
             self.refreshFirmwareAvailability()
             if !connectedDevices.isEmpty {
-                self.statusController.setStatus("Preparing…")
                 self.ble.sendInteractionMode(self.config.interactionMode)
                 self.asr.prewarm()
-            } else {
-                self.statusController.setStatus(self.pairedDeviceIDs.isEmpty ? "请配对 VoiceStick" : "正在搜索 VoiceStick")
             }
         }
 
@@ -238,8 +252,13 @@ final class VoiceStickCoordinator {
     }
 
     func updateConfig(_ config: AppConfig) {
+        clearPrimaryReturnCandidate()
+        suppressedPrimaryClickPeripheralID = nil
         let wasRecognizing = asrStarted || mainInputState.isBusy || isWaitingForFinalText || !subtitleCycles.isEmpty
         if wasRecognizing {
+            mainCycleToken = nil
+            activeASRErrorCycleToken = nil
+            statusController.setStatus(.ready, deviceID: activeDeviceID)
             asr.onPartial = nil
             asr.onSegment = nil
             asr.onFinal = nil
@@ -249,6 +268,7 @@ final class VoiceStickCoordinator {
             for cycle in subtitleCycles.values {
                 cycle.asr.cancel()
                 cycle.debugAudioRecorder.discard()
+                statusController.setStatus(.ready, deviceID: cycle.deviceID)
             }
             subtitleCycles.removeAll()
             activeSubtitleSessions.removeAll()
@@ -285,10 +305,16 @@ final class VoiceStickCoordinator {
     }
 
     private func configureASRCallbacks() {
+        let cycleToken = mainCycleToken
+        let cycleDeviceID = activeDeviceID
         asr.onPartial = { [weak self] text in
             DispatchQueue.main.async {
-                guard let self else { return }
-                self.statusController.showPartial(text, deviceID: self.activeDeviceID)
+                guard let self, let cycleToken, self.mainCycleToken == cycleToken else { return }
+                self.statusController.showPartial(
+                    text,
+                    deviceID: self.activeDeviceID,
+                    status: self.mainInputState.isFinalizing ? .processing : .listening
+                )
                 if self.shouldSendPartialToDevice() {
                     self.sendUIStateForActiveDevice("thinking", text: text)
                 }
@@ -297,25 +323,33 @@ final class VoiceStickCoordinator {
 
         asr.onSegment = { [weak self] segment in
             DispatchQueue.main.async {
-                self?.handleDefiniteSegment(segment)
+                guard let self, let cycleToken, self.mainCycleToken == cycleToken else { return }
+                self.handleDefiniteSegment(segment)
             }
         }
 
         asr.onFinal = { [weak self] text in
             DispatchQueue.main.async {
-                self?.finishWithFinalText(text)
+                guard let self, let cycleToken, self.mainCycleToken == cycleToken else { return }
+                self.finishWithFinalText(text)
             }
         }
 
         asr.onError = { [weak self] message in
             DispatchQueue.main.async {
-                self?.finishWithASRError(message)
+                guard let self, let cycleToken, self.mainCycleToken == cycleToken else { return }
+                self.finishWithASRError(message)
             }
         }
 
         asr.onUpgradeURL = { [weak self] url, message in
             DispatchQueue.main.async {
-                self?.presentASRUpgradeAlert(url: url, message: message)
+                guard let self, let cycleToken,
+                      self.mainCycleToken == cycleToken || self.activeASRErrorCycleToken == cycleToken
+                else { return }
+                self.presentASRUpgradeAlert(
+                    url: url, message: message, cycleToken: cycleToken, deviceID: cycleDeviceID
+                )
             }
         }
     }
@@ -323,47 +357,70 @@ final class VoiceStickCoordinator {
     private func configureSubtitleASRCallbacks(for cycle: SubtitleCycle) {
         let peripheralID = cycle.peripheralID
         let sessionID = cycle.sessionID
-        cycle.asr.onPartial = { [weak self] text in
-            DispatchQueue.main.async {
+        cycle.asr.onPartial = { [weak self, weak cycle] text in
+            DispatchQueue.main.async { [weak self, weak cycle] in
                 guard
                     let self,
-                    let cycle = self.subtitleCycle(peripheralID: peripheralID, sessionID: sessionID),
+                    let cycle,
+                    self.subtitleCycle(peripheralID: peripheralID, sessionID: sessionID) === cycle,
                     self.canUpdateOverlayForSubtitleCycle(peripheralID: peripheralID, sessionID: sessionID)
                 else { return }
-                self.statusController.showPartial(text, deviceID: cycle.deviceID)
+                self.statusController.showPartial(
+                    text,
+                    deviceID: cycle.deviceID,
+                    status: cycle.sentFinalAudioChunk || cycle.waitingForAudioEnd ? .processing : .listening
+                )
                 if self.shouldSendSubtitlePartialToDevice(cycle) {
                     self.ble.sendUIState("thinking", text: text, to: peripheralID)
                 }
             }
         }
-        cycle.asr.onSegment = { [weak self] segment in
-            DispatchQueue.main.async {
-                guard self?.isActiveSubtitleCycle(peripheralID: peripheralID, sessionID: sessionID) == true else {
-                    return
-                }
-                self?.handleSubtitleDefiniteSegment(segment, peripheralID: peripheralID)
+        cycle.asr.onSegment = { [weak self, weak cycle] segment in
+            DispatchQueue.main.async { [weak self, weak cycle] in
+                guard let self, let cycle,
+                      self.subtitleCycle(peripheralID: peripheralID, sessionID: sessionID) === cycle,
+                      self.isActiveSubtitleCycle(peripheralID: peripheralID, sessionID: sessionID)
+                else { return }
+                self.handleSubtitleDefiniteSegment(segment, peripheralID: peripheralID)
             }
         }
-        cycle.asr.onFinal = { [weak self] text in
-            DispatchQueue.main.async {
-                self?.finishSubtitleCycleWithFinalText(
+        cycle.asr.onFinal = { [weak self, weak cycle] text in
+            DispatchQueue.main.async { [weak self, weak cycle] in
+                guard let self, let cycle,
+                      self.subtitleCycle(peripheralID: peripheralID, sessionID: sessionID) === cycle
+                else { return }
+                self.finishSubtitleCycleWithFinalText(
                     peripheralID: peripheralID,
                     sessionID: sessionID,
                     text: text
                 )
             }
         }
-        cycle.asr.onError = { [weak self] message in
-            DispatchQueue.main.async {
-                self?.finishSubtitleCycleWithError(
+        cycle.asr.onError = { [weak self, weak cycle] message in
+            DispatchQueue.main.async { [weak self, weak cycle] in
+                guard let self, let cycle,
+                      self.subtitleCycle(peripheralID: peripheralID, sessionID: sessionID) === cycle
+                else { return }
+                self.finishSubtitleCycleWithError(
                     peripheralID: peripheralID,
                     sessionID: sessionID,
                     message: message
                 )
             }
         }
-        cycle.asr.onUpgradeURL = { url, _ in
-            DispatchQueue.main.async {
+        let deviceID = cycle.deviceID
+        let connectionEpoch = deviceID.flatMap { connectionEpochs[$0] }
+        cycle.asr.onUpgradeURL = { [weak self, weak cycle] url, _ in
+            DispatchQueue.main.async { [weak self, weak cycle] in
+                guard let self, let deviceID, let connectionEpoch,
+                      self.connectionEpochs[deviceID] == connectionEpoch,
+                      self.ble.isConnected(peripheralID)
+                else { return }
+                if let currentCycle = self.subtitleCycle(peripheralID: peripheralID, sessionID: sessionID) {
+                    guard currentCycle === cycle else { return }
+                } else if self.hasActiveSubtitleSession(peripheralID: peripheralID) {
+                    return
+                }
                 NSWorkspace.shared.open(url)
             }
         }
@@ -432,6 +489,7 @@ final class VoiceStickCoordinator {
     }
 
     private func handleStateEvent(_ event: StateEvent, peripheralID: UUID) {
+        guard ble.isConnected(peripheralID) else { return }
         switch event.event {
         case "device_info":
             if let hardware = event.hardware, let firmwareVersion = event.firmwareVersion {
@@ -444,7 +502,9 @@ final class VoiceStickCoordinator {
                 "ble_device_info device=\(reportedDeviceID) firmware=\(reportedFirmwareVersion)"
             )
         case "transport_ready":
-            statusController.setStatus("Ready")
+            if let deviceID = deviceID(for: peripheralID) {
+                statusController.markTransportReady(deviceID: deviceID)
+            }
             DiagnosticLog.write("ble_transport_ready device=\(deviceID(for: peripheralID) ?? "unknown")")
         case "button_down":
             handleButtonDown(event, peripheralID: peripheralID)
@@ -595,6 +655,7 @@ final class VoiceStickCoordinator {
     }
 
     private func beginPrimaryReturnGesture(sessionID: UInt32?, peripheralID: UUID) {
+        guard ble.isConnected(peripheralID) else { return }
         clearPrimaryReturnCandidate()
         suppressedPrimaryClickPeripheralID = nil
         primaryReturnCandidatePeripheralID = peripheralID
@@ -624,7 +685,9 @@ final class VoiceStickCoordinator {
 
     private func startDeferredPrimaryRecording(peripheralID: UUID) {
         guard primaryReturnCandidatePeripheralID == peripheralID,
-              !primaryReturnDeferredToRecording
+              !primaryReturnDeferredToRecording,
+              ble.isConnected(peripheralID),
+              !mainInputState.isBusy
         else { return }
         let sessionID = primaryReturnCandidateSessionID
         let startedAt = primaryReturnCandidateStartedAt
@@ -651,8 +714,15 @@ final class VoiceStickCoordinator {
         peripheralID: UUID,
         startedAt: Date = Date()
     ) {
+        guard ble.isConnected(peripheralID), !mainInputState.isBusy else { return }
         cancelAudioFrameInactivityTimeout()
+        mainCycleToken = UUID()
+        activeASRErrorCycleToken = nil
+        mainCyclePeripheralID = peripheralID
+        mainCycleDeviceID = deviceID(for: peripheralID)
+        retainingDisconnectedFinalResult = false
         mainInputState = .recording(sessionID: sessionID, peripheralID: peripheralID, startedAt: startedAt)
+        configureASRCallbacks()
         receivedAudioFrames = 0
         hasLoggedFirstAudioFrame = false
         previousAudioFrameSequence = nil
@@ -746,6 +816,12 @@ final class VoiceStickCoordinator {
         if !hasLoggedFirstAudioFrame {
             hasLoggedFirstAudioFrame = true
             DiagnosticLog.write("audio_first_frame_received device=\(deviceID(for: peripheralID) ?? "unknown") session=\(frame.sessionID)")
+            // Older firmware or a restored connection can miss the one-shot
+            // transport_ready notification. Real session audio proves that the
+            // recording transport is usable; a timer or generic Ready does not.
+            if let deviceID = deviceID(for: peripheralID) {
+                statusController.markTransportReady(deviceID: deviceID)
+            }
             statusController.showListening(deviceID: deviceID(for: peripheralID))
         }
         if receivedAudioFrames % 10 == 0 {
@@ -753,11 +829,13 @@ final class VoiceStickCoordinator {
         }
         let oggChunk = oggMuxer.append(opusPayload: frame.payload, isLast: frame.isEnd)
         debugAudioRecorder.append(oggChunk)
+        let cycleToken = mainCycleToken
         sendOrBufferOggChunk(
             oggChunk,
             isLast: frame.isEnd,
             canStartASR: currentRecordingDuration >= minimumRecordingDuration
         )
+        guard let cycleToken, mainCycleToken == cycleToken else { return }
         if frame.isEnd {
             cancelAudioEndTimeout()
             cancelAudioFrameInactivityTimeout()
@@ -768,7 +846,7 @@ final class VoiceStickCoordinator {
                 cancelShortRecording()
             } else if asrStarted {
                 debugAudioRecorder.finish()
-                statusController.setStatus("Processing")
+                statusController.setStatus(.processing, deviceID: activeDeviceID)
                 sendUIStateForActiveDevice("thinking")
             } else {
                 debugAudioRecorder.finish()
@@ -776,7 +854,7 @@ final class VoiceStickCoordinator {
                     finishWithASRError("Failed to start ASR")
                     return
                 }
-                statusController.setStatus("Processing")
+                statusController.setStatus(.processing, deviceID: activeDeviceID)
                 sendUIStateForActiveDevice("thinking")
             }
         }
@@ -797,7 +875,7 @@ final class VoiceStickCoordinator {
         }
         NSLog("Main input finalizing reason=\(reason)")
         mainInputState = .finalizing(sessionID: sessionID, peripheralID: peripheralID, startedAt: startedAt)
-        statusController.setStatus("Processing")
+        statusController.setStatus(.processing, deviceID: activeDeviceID)
         sendUIStateForActiveDevice("thinking")
     }
 
@@ -904,6 +982,9 @@ final class VoiceStickCoordinator {
         }
         guard !frame.payload.isEmpty else { return }
         cycle.receivedAudioFrames += 1
+        if cycle.receivedAudioFrames == 1, let deviceID = cycle.deviceID {
+            statusController.markTransportReady(deviceID: deviceID)
+        }
         let oggChunk = cycle.oggMuxer.append(opusPayload: frame.payload, isLast: frame.isEnd)
         cycle.debugAudioRecorder.append(oggChunk)
         sendOrBufferSubtitleOggChunk(
@@ -912,6 +993,7 @@ final class VoiceStickCoordinator {
             canStartASR: cycle.duration >= minimumRecordingDuration,
             cycle: cycle
         )
+        guard subtitleCycle(peripheralID: peripheralID, sessionID: cycle.sessionID) === cycle else { return }
         if frame.isEnd {
             cancelSubtitleAudioEndTimeout(cycle)
             cycle.sentFinalAudioChunk = true
@@ -940,7 +1022,7 @@ final class VoiceStickCoordinator {
         cycle.waitingForAudioEnd = true
         NSLog("Waiting for subtitle audio END frame VS-\(cycle.deviceID ?? "unknown") reason=\(reason)")
         if config.interactionMode != .holdToTalk {
-            statusController.setStatus("Processing")
+            statusController.setStatus(.processing, deviceID: cycle.deviceID)
             ble.sendUIState("thinking", to: cycle.peripheralID)
         }
         scheduleSubtitleAudioEndTimeout(cycle)
@@ -989,7 +1071,7 @@ final class VoiceStickCoordinator {
             clearActiveSubtitleSession(peripheralID: cycle.peripheralID, sessionID: cycle.sessionID)
             ble.sendUIState("ready", to: cycle.peripheralID)
         } else {
-            statusController.setStatus("Processing")
+            statusController.setStatus(.processing, deviceID: cycle.deviceID)
             ble.sendUIState("thinking", to: cycle.peripheralID)
         }
     }
@@ -1051,8 +1133,10 @@ final class VoiceStickCoordinator {
         DiagnosticLog.write("audio_final_chunk_sent device=\(activeDeviceID ?? "unknown") session=\(activeSessionID.map(String.init) ?? "nil") recording_ms=\(Int(recordingDuration * 1_000)) frames=\(receivedAudioFrames)")
         debugAudioRecorder.append(finalChunk)
         debugAudioRecorder.finish()
+        let cycleToken = mainCycleToken
         sendOrBufferOggChunk(finalChunk, isLast: true, canStartASR: true)
-        statusController.setStatus("Processing")
+        guard let cycleToken, mainCycleToken == cycleToken else { return }
+        statusController.setStatus(.processing, deviceID: activeDeviceID)
         sendUIStateForActiveDevice("thinking")
     }
 
@@ -1107,19 +1191,21 @@ final class VoiceStickCoordinator {
         cancelAudioEndTimeout()
         cancelAudioFrameInactivityTimeout()
         bufferedOggChunks.removeAll(keepingCapacity: true)
+        mainCycleToken = nil
+        retainingDisconnectedFinalResult = false
         asr.cancel()
         asrStarted = false
         sentFinalAudioChunk = false
         pastedFinalText = false
         debugAudioRecorder.discard()
-        statusController.setStatus("Ready")
-        statusController.hideOverlay()
+        statusController.setStatus(.ready, deviceID: activeDeviceID)
+        statusController.hideOverlay(deviceID: activeDeviceID, onHidden: {})
         sendUIStateForActiveDevice("ready")
         mainInputState = .ready
     }
 
     private func finishWithFinalText(_ text: String) {
-        guard !pastedFinalText else { return }
+        guard mainCycleToken != nil, !pastedFinalText else { return }
         DiagnosticLog.write("recognition_final_received device=\(activeDeviceID ?? "unknown") session=\(activeSessionID.map(String.init) ?? "nil") text_length=\(text.count)")
         let profile = outputProfile(for: activeDeviceID)
         if profile.target == .subtitle {
@@ -1130,8 +1216,8 @@ final class VoiceStickCoordinator {
                 showSubtitleText(text, profile: profile, deviceID: deviceID)
             }
             finishRecognitionCycle()
-            statusController.hideOverlay()
-            statusController.setStatus("Ready")
+            statusController.hideOverlay(deviceID: deviceID, onHidden: {})
+            statusController.setStatus(.ready, deviceID: deviceID)
             sendUIStateForActiveDevice("ready")
             mainInputState = .ready
             return
@@ -1140,8 +1226,8 @@ final class VoiceStickCoordinator {
             pastedFinalText = true
             pendingPasteState = .idle
             finishRecognitionCycle()
-            statusController.hideOverlay()
-            statusController.setStatus("Ready")
+            statusController.hideOverlay(deviceID: activeDeviceID, onHidden: {})
+            statusController.setStatus(.ready, deviceID: activeDeviceID)
             sendUIStateForActiveDevice("ready")
             mainInputState = .ready
             return
@@ -1149,9 +1235,15 @@ final class VoiceStickCoordinator {
 
         if profile.transform == .translate {
             pastedFinalText = true
-            statusController.setStatus("Translating")
+            // Keep the accepted original result recoverable if disconnection
+            // cancels a translation before its output is ready to paste.
+            lastRecoverableText = text
+            lastRecoverablePeripheralID = activePeripheralID
+            statusController.setHasRecoverableInput(true)
+            let cycleToken = mainCycleToken
+            statusController.setStatus(.processing, deviceID: activeDeviceID)
             transformText(text, profile: profile, deviceID: activeDeviceID) { [weak self] result in
-                guard let self else { return }
+                guard let self, let cycleToken, self.mainCycleToken == cycleToken else { return }
                 switch result {
                 case .success(let translatedText):
                     self.enterPendingConfirmation(text: translatedText)
@@ -1185,7 +1277,11 @@ final class VoiceStickCoordinator {
         let profile = outputProfile(for: deviceID)
         guard shouldUseDefiniteSegments(for: profile) else { return }
         statusController.hideOverlay(deviceID: deviceID)
-        showSubtitleText(segment.text, profile: profile, deviceID: deviceID)
+        let cycleToken = mainCycleToken
+        showSubtitleText(segment.text, profile: profile, deviceID: deviceID, isCurrent: { [weak self] in
+            guard let cycleToken else { return false }
+            return self?.mainCycleToken == cycleToken
+        })
     }
 
     private func handleSubtitleDefiniteSegment(_ segment: ASRSegment, peripheralID: UUID) {
@@ -1193,7 +1289,10 @@ final class VoiceStickCoordinator {
         let profile = outputProfile(for: cycle.deviceID)
         guard shouldUseDefiniteSegments(for: profile) else { return }
         statusController.hideOverlay(deviceID: cycle.deviceID)
-        showSubtitleText(segment.text, profile: profile, deviceID: cycle.deviceID)
+        showSubtitleText(segment.text, profile: profile, deviceID: cycle.deviceID, isCurrent: { [weak self, weak cycle] in
+            guard let self, let cycle else { return false }
+            return self.subtitleCycle(peripheralID: peripheralID, sessionID: cycle.sessionID) === cycle
+        })
     }
 
     private func finishSubtitleCycleWithFinalText(peripheralID: UUID, sessionID: UInt32, text: String) {
@@ -1204,8 +1303,13 @@ final class VoiceStickCoordinator {
         NSLog("Subtitle final text dev=VS-\(cycle.deviceID ?? "unknown") session=\(sessionID) text_len=\(text.count)")
         let profile = outputProfile(for: cycle.deviceID)
         if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            showSubtitleText(text, profile: profile, deviceID: cycle.deviceID) { [weak self] didShowSubtitle in
-                guard let self else { return }
+            showSubtitleText(text, profile: profile, deviceID: cycle.deviceID, isCurrent: { [weak self, weak cycle] in
+                guard let self, let cycle else { return false }
+                return self.subtitleCycle(peripheralID: peripheralID, sessionID: sessionID) === cycle
+            }) { [weak self, weak cycle] didShowSubtitle in
+                guard let self, let cycle,
+                      self.subtitleCycle(peripheralID: peripheralID, sessionID: sessionID) === cycle
+                else { return }
                 self.finishSubtitleCycle(
                     peripheralID: peripheralID,
                     sessionID: sessionID,
@@ -1234,7 +1338,9 @@ final class VoiceStickCoordinator {
         clearActiveSubtitleSession(peripheralID: peripheralID, sessionID: sessionID)
         if !hasActiveSubtitleSession(peripheralID: peripheralID) {
             statusController.showError(message, deviceID: cycle.deviceID) { [weak self] in
-                self?.ble.sendUIState("ready", to: peripheralID)
+                guard let self, !self.hasActiveSubtitleSession(peripheralID: peripheralID) else { return }
+                self.statusController.setStatus(.ready, deviceID: cycle.deviceID)
+                self.ble.sendUIState("ready", to: peripheralID)
             }
         }
         subtitleCycles.removeValue(forKey: SubtitleCycleKey(peripheralID: peripheralID, sessionID: sessionID))
@@ -1246,7 +1352,8 @@ final class VoiceStickCoordinator {
         cycle.asr.cancel()
         cycle.debugAudioRecorder.discard()
         cancelSubtitleAudioEndTimeout(cycle)
-        statusController.hideOverlay(deviceID: cycle.deviceID)
+        statusController.hideOverlay(deviceID: cycle.deviceID, onHidden: {})
+        statusController.setStatus(.ready, deviceID: cycle.deviceID)
         ble.sendUIState("ready", to: peripheralID)
         clearActiveSubtitleSession(peripheralID: peripheralID, sessionID: cycle.sessionID)
         subtitleCycles.removeValue(
@@ -1262,7 +1369,7 @@ final class VoiceStickCoordinator {
         }
         clearActiveSubtitleSession(peripheralID: peripheralID, sessionID: sessionID)
         if !hasActiveSubtitleSession(peripheralID: peripheralID) {
-            statusController.setStatus("Ready")
+            statusController.setStatus(.ready, deviceID: cycle.deviceID)
             ble.sendUIState("ready", to: peripheralID)
         }
         subtitleCycles.removeValue(forKey: SubtitleCycleKey(peripheralID: peripheralID, sessionID: sessionID))
@@ -1311,6 +1418,7 @@ final class VoiceStickCoordinator {
         NSLog("Cancel subtitle cycles \(peripheralID) reason=\(reason)")
         activeSubtitleSessions.removeValue(forKey: peripheralID)
         let keys = subtitleCycles.keys.filter { $0.peripheralID == peripheralID }
+        let cancelledDeviceID = keys.compactMap { subtitleCycles[$0]?.deviceID }.first ?? deviceID(for: peripheralID)
         for key in keys {
             guard let cycle = subtitleCycles[key] else { continue }
             cycle.asr.cancel()
@@ -1318,7 +1426,8 @@ final class VoiceStickCoordinator {
             cancelSubtitleAudioEndTimeout(cycle)
             subtitleCycles.removeValue(forKey: key)
         }
-        statusController.hideOverlay(deviceID: deviceID(for: peripheralID))
+        statusController.hideOverlay(deviceID: cancelledDeviceID, onHidden: {})
+        statusController.setStatus(.ready, deviceID: cancelledDeviceID)
         ble.sendUIState("ready", to: peripheralID)
     }
 
@@ -1326,14 +1435,22 @@ final class VoiceStickCoordinator {
         _ text: String,
         profile: OutputProfile,
         deviceID: String?,
+        isCurrent: @escaping () -> Bool = { true },
         completion: ((Bool) -> Void)? = nil
     ) {
-        guard let deviceID else {
+        guard let deviceID, let connectionEpoch = connectionEpochs[deviceID] else {
             completion?(false)
             return
         }
         transformText(text, profile: profile, deviceID: deviceID) { [weak self] result in
-            guard let self else { return }
+            guard let self,
+                  self.connectionEpochs[deviceID] == connectionEpoch,
+                  self.ble.isConnected(deviceID: deviceID),
+                  isCurrent()
+            else {
+                completion?(false)
+                return
+            }
             switch result {
             case .success(let outputText):
                 NSLog("Subtitle show text dev=VS-\(deviceID) text_len=\(outputText.count)")
@@ -1373,6 +1490,8 @@ final class VoiceStickCoordinator {
     }
 
     private func finishWithASRError(_ message: String) {
+        guard mainCycleToken != nil else { return }
+        activeASRErrorCycleToken = mainCycleToken
         NSLog("ASR error: \(message)")
         DiagnosticLog.write("recognition_error_received device=\(activeDeviceID ?? "unknown") session=\(activeSessionID.map(String.init) ?? "nil") message_length=\(message.utf8.count)")
         cancelAudioEndTimeout()
@@ -1394,9 +1513,11 @@ final class VoiceStickCoordinator {
         }
     }
 
-    private func presentASRUpgradeAlert(url: URL, message: String) {
-        statusController.hideOverlay { [weak self] in
-            guard let self else { return }
+    private func presentASRUpgradeAlert(url: URL, message: String, cycleToken: UUID, deviceID: String?) {
+        statusController.hideOverlay(deviceID: deviceID) { [weak self] in
+            guard let self,
+                  self.mainCycleToken == cycleToken || self.activeASRErrorCycleToken == cycleToken
+            else { return }
             self.recoverFromASRError(hideOverlay: false)
             NSApp.activate(ignoringOtherApps: true)
 
@@ -1416,13 +1537,14 @@ final class VoiceStickCoordinator {
         guard isShowingASRError else { return }
         errorRecoveryToken += 1
         isShowingASRError = false
+        activeASRErrorCycleToken = nil
         if hideOverlay {
-            statusController.hideOverlay()
+            statusController.hideOverlay(deviceID: activeDeviceID, onHidden: {})
         }
         if pairedDeviceIDs.isEmpty {
             statusController.setStatus("Pair a VoiceStick")
         } else {
-            statusController.setStatus("Ready")
+            statusController.setStatus(.ready, deviceID: activeDeviceID)
             sendUIStateForActiveDevice("ready")
             mainInputState = .ready
         }
@@ -1441,7 +1563,7 @@ final class VoiceStickCoordinator {
         pendingSecondaryReturn = config.sideEnter
         pendingPasteState = .idle
         finishRecognitionCycle()
-        statusController.setStatus("Ready")
+        statusController.setStatus(.ready, deviceID: activeDeviceID)
         sendUIStateForActiveDevice("ready")
         mainInputState = .ready
         inputInjector.paste(text: text, pressEnter: shouldPressEnter)
@@ -1527,8 +1649,8 @@ final class VoiceStickCoordinator {
         guard activePeripheralID == peripheralID else { return }
         pendingPasteState = .idle
         finishRecognitionCycle()
-        statusController.hideOverlay()
-        statusController.setStatus("Ready")
+        statusController.hideOverlay(deviceID: activeDeviceID, onHidden: {})
+        statusController.setStatus(.ready, deviceID: activeDeviceID)
         sendUIStateForActiveDevice("ready")
         mainInputState = .ready
     }
@@ -1539,37 +1661,63 @@ final class VoiceStickCoordinator {
         asr.cancel()
         pendingPasteState = .idle
         finishRecognitionCycle()
-        statusController.hideOverlay()
-        statusController.setStatus("Ready")
+        statusController.hideOverlay(deviceID: activeDeviceID, onHidden: {})
+        statusController.setStatus(.ready, deviceID: activeDeviceID)
         sendUIStateForActiveDevice("ready")
         mainInputState = .ready
     }
 
     private func cancelActiveCycleIfDeviceDisconnected() {
+        if let candidate = primaryReturnCandidatePeripheralID, !ble.isConnected(candidate) {
+            clearPrimaryReturnCandidate()
+        }
+        if let suppressedClick = suppressedPrimaryClickPeripheralID, !ble.isConnected(suppressedClick) {
+            suppressedPrimaryClickPeripheralID = nil
+        }
         let disconnectedSubtitleKeys = subtitleCycles.keys.filter { !ble.isConnected($0.peripheralID) }
         for key in disconnectedSubtitleKeys {
             guard let cycle = subtitleCycles[key] else { continue }
             cycle.asr.cancel()
             cycle.debugAudioRecorder.discard()
-            statusController.hideOverlay(deviceID: cycle.deviceID)
+            cancelSubtitleAudioEndTimeout(cycle)
+            statusController.hideOverlay(deviceID: cycle.deviceID, onHidden: {})
+            if let deviceID = cycle.deviceID {
+                subtitleController.hide(deviceID: deviceID)
+            }
             clearActiveSubtitleSession(peripheralID: key.peripheralID, sessionID: key.sessionID)
             subtitleCycles.removeValue(forKey: key)
         }
         guard let activePeripheralID, !ble.isConnected(activePeripheralID) else { return }
         if waitingForAudioEnd {
+            // Preserve the existing policy: released, already buffered speech
+            // can finish recognition. Offline UI is independent of that result.
+            retainingDisconnectedFinalResult = true
             sendFinalOggChunkIfNeeded(recordingDuration: currentRecordingDuration)
             return
         }
+        if retainingDisconnectedFinalResult, mainInputState.isFinalizing {
+            return
+        }
+        let disconnectedDeviceID = activeDeviceID
+        mainCycleToken = nil
         asr.cancel()
         pendingPasteState = .idle
         mainInputState = .ready
         debugAudioRecorder.discard()
         finishRecognitionCycle()
-        statusController.hideOverlay()
-        subtitleController.hideAll()
+        isShowingASRError = false
+        activeASRErrorCycleToken = nil
+        errorRecoveryToken += 1
+        pendingSecondaryReturn = false
+        statusController.hideOverlay(deviceID: disconnectedDeviceID, onHidden: {})
+        if let deviceID = disconnectedDeviceID {
+            subtitleController.hide(deviceID: deviceID)
+        }
     }
 
     private func finishRecognitionCycle() {
+        mainCycleToken = nil
+        retainingDisconnectedFinalResult = false
         cancelAudioEndTimeout()
         cancelAudioFrameInactivityTimeout()
         asrStarted = false
@@ -1733,7 +1881,11 @@ final class VoiceStickCoordinator {
     }
 
     private var activeDeviceID: String? {
-        activePeripheralID.flatMap { ble.deviceID(for: $0) }
+        guard let activePeripheralID else { return nil }
+        if activePeripheralID == mainCyclePeripheralID {
+            return mainCycleDeviceID ?? ble.deviceID(for: activePeripheralID)
+        }
+        return ble.deviceID(for: activePeripheralID)
     }
 
     private func outputProfile(for deviceID: String?) -> OutputProfile {

@@ -2,84 +2,6 @@ import AppKit
 import Sparkle
 
 final class StatusController {
-    private enum AppStatus {
-        case needsPairing
-        case listening
-        case processing
-        case ready
-        case error
-
-        init(text: String) {
-            let normalized = text.lowercased()
-            if normalized.contains("pair") || normalized.contains("配对") {
-                self = .needsPairing
-            } else if normalized.contains("listen") || normalized.contains("录音") {
-                self = .listening
-            } else if normalized.contains("error") || normalized.contains("failed") || normalized.contains("错误") || normalized.contains("失败") {
-                self = .error
-            } else if normalized.contains("process") || normalized.contains("final") || normalized.contains("transcrib") || normalized.contains("处理") {
-                self = .processing
-            } else if normalized.contains("ready") ||
-                        normalized.contains("connect") ||
-                        normalized.contains("scan") ||
-                        normalized.contains("match") ||
-                        normalized.contains("pause") ||
-                        normalized.contains("no speech") ||
-                        normalized.contains("准备") ||
-                        normalized.contains("未检测") {
-                self = .ready
-            } else {
-                self = .processing
-            }
-        }
-
-        func symbolName(hasConnectedDevices: Bool) -> String {
-            switch self {
-            case .needsPairing:
-                return "dot.radiowaves.left.and.right"
-            case .listening:
-                return "mic.fill"
-            case .processing:
-                return "waveform"
-            case .ready:
-                if !hasConnectedDevices {
-                    return "dot.radiowaves.left.and.right"
-                }
-                return "link.circle.fill"
-            case .error:
-                return "exclamationmark.triangle"
-            }
-        }
-
-        var accessibilityDescription: String {
-            switch self {
-            case .needsPairing:
-                return "请配对 VoiceStick"
-            case .listening:
-                return "正在录音"
-            case .processing:
-                return "正在处理"
-            case .ready:
-                return "准备就绪"
-            case .error:
-                return "发生错误"
-            }
-        }
-
-        var visibleTitle: String? {
-            switch self {
-            case .needsPairing:
-                return "配对"
-            case .processing:
-                return "Processing"
-            case .error:
-                return "错误"
-            case .listening, .ready:
-                return nil
-            }
-        }
-    }
-
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let updaterController: SPUStandardUpdaterController
@@ -109,6 +31,7 @@ final class StatusController {
     private var deviceThemeColors: [String: OverlayThemeColor]
     private var deviceOverlayPositions: [String: OverlayPosition]
     private var connectedDevices: [ConnectedVoiceStickDevice] = []
+    private var presentationState: StatusPresentationState
     private var firmwareInfoByDeviceID: [String: DeviceFirmwareInfo] = [:]
     private var interactionMode: InteractionMode
     private var autoEnter: Bool
@@ -144,7 +67,8 @@ final class StatusController {
         self.defaultOutputProfile = defaultOutputProfile
         self.deviceOutputProfiles = deviceOutputProfiles
         self.needsPairing = pairedDeviceIDs.isEmpty
-        updateStatusButton(.ready)
+        self.presentationState = StatusPresentationState(pairedDeviceIDs: Set(pairedDeviceIDs))
+        updateStatusButton(presentationState.displayedStatus)
         rebuildMenu()
     }
 
@@ -154,6 +78,8 @@ final class StatusController {
         deviceOverlayPositions = deviceOverlayPositions.filter { deviceIDs.contains($0.key) }
         deviceOutputProfiles = deviceOutputProfiles.filter { deviceIDs.contains($0.key) }
         needsPairing = deviceIDs.isEmpty
+        presentationState.setPairedDeviceIDs(Set(deviceIDs))
+        updateStatusButton(presentationState.displayedStatus)
         rebuildMenu()
     }
 
@@ -172,7 +98,20 @@ final class StatusController {
         guard connectedDevices.map(\.deviceID) != sortedDevices.map(\.deviceID) ||
                 connectedDevices.map(\.name) != sortedDevices.map(\.name) else { return }
         connectedDevices = sortedDevices
+        let disconnectedDeviceIDs = presentationState.updateConnections(Set(sortedDevices.map(\.deviceID)))
+        // A disconnected device must not retain a recording/processing panel or
+        // execute the old final-panel auto-paste completion while being hidden.
+        for deviceID in disconnectedDeviceIDs {
+            hideOverlay(deviceID: deviceID, onHidden: {})
+        }
+        updateStatusButton(presentationState.displayedStatus)
+        DiagnosticLog.write("ui_connection_status connected_devices=\(sortedDevices.count) status=\(presentationState.displayedStatus)")
         rebuildMenu()
+    }
+
+    func markTransportReady(deviceID: String) {
+        presentationState.markTransportReady(deviceID)
+        updateStatusButton(presentationState.displayedStatus)
     }
 
     func setFirmwareInfo(_ infoByDeviceID: [String: DeviceFirmwareInfo]) {
@@ -538,22 +477,36 @@ final class StatusController {
         }
     }
 
-    func setStatus(_ text: String) {
-        DispatchQueue.main.async {
-            self.updateStatusButton(AppStatus(text: text))
+    func setStatus(_ text: String, deviceID: String? = nil) {
+        setStatus(VoiceStickStatus(text: text), deviceID: deviceID)
+    }
+
+    func setStatus(_ status: VoiceStickStatus, deviceID: String? = nil) {
+        let update = { [weak self] in
+            guard let self else { return }
+            self.presentationState.setStatus(status, deviceID: deviceID)
+            self.updateStatusButton(self.presentationState.displayedStatus)
+        }
+        if Thread.isMainThread {
+            update()
+        } else {
+            DispatchQueue.main.async(execute: update)
         }
     }
 
     func showListening(deviceID: String? = nil) {
-        setStatus("正在录音")
+        guard canShowActivityOverlay(deviceID: deviceID) else { return }
+        setStatus(.listening, deviceID: deviceID)
         let overlay = overlay(for: deviceID)
         markOverlayVisible(for: deviceID)
         applyOverlayStyle(for: deviceID, overlay: overlay)
         overlay.showListening(text: "")
     }
 
-    func showPartial(_ text: String, deviceID: String? = nil) {
-        setStatus(text.isEmpty ? "正在录音" : text)
+    func showPartial(_ text: String, deviceID: String? = nil, status: VoiceStickStatus = .listening) {
+        guard canShowActivityOverlay(deviceID: deviceID) else { return }
+        // Recognized speech is content, not an application-status command.
+        setStatus(status, deviceID: deviceID)
         let overlay = overlay(for: deviceID)
         markOverlayVisible(for: deviceID)
         applyOverlayStyle(for: deviceID, overlay: overlay)
@@ -561,7 +514,7 @@ final class StatusController {
     }
 
     func showFinal(_ text: String, deviceID: String? = nil, onHidden: (() -> Void)? = nil) {
-        setStatus(text.isEmpty ? "未检测到语音" : "准备就绪")
+        setStatus(.ready, deviceID: deviceID)
         let overlay = overlay(for: deviceID)
         markOverlayVisible(for: deviceID)
         applyOverlayStyle(for: deviceID, overlay: overlay)
@@ -579,7 +532,11 @@ final class StatusController {
     }
 
     func showError(_ text: String, deviceID: String? = nil, onHidden: (() -> Void)? = nil) {
-        setStatus("语音识别错误：\(text)")
+        guard canShowActivityOverlay(deviceID: deviceID) else {
+            onHidden?()
+            return
+        }
+        setStatus(.error, deviceID: deviceID)
         let overlay = overlay(for: deviceID)
         markOverlayVisible(for: deviceID)
         applyOverlayStyle(for: deviceID, overlay: overlay)
@@ -618,7 +575,12 @@ final class StatusController {
         overlay.hide(onHidden: onHidden)
     }
 
-    private func updateStatusButton(_ status: AppStatus) {
+    private func canShowActivityOverlay(deviceID: String?) -> Bool {
+        guard let deviceID else { return !connectedDevices.isEmpty }
+        return connectedDevices.contains { $0.deviceID == deviceID }
+    }
+
+    private func updateStatusButton(_ status: VoiceStickStatus) {
         guard let button = statusItem.button else { return }
         button.image = Self.symbolImage(
             named: status.symbolName(hasConnectedDevices: !connectedDevices.isEmpty),

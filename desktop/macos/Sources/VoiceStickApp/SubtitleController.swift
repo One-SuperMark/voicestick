@@ -57,7 +57,7 @@ final class SubtitleController {
     func show(text: String, deviceID: String, color: OverlayThemeColor) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        DispatchQueue.main.async {
+        let update = { [self] in
             self.generation += 1
             let generation = self.generation
             self.lanes[AppConfig.normalizedDeviceID(deviceID)] = Lane(
@@ -69,6 +69,23 @@ final class SubtitleController {
             DispatchQueue.main.asyncAfter(deadline: .now() + self.holdSeconds) { [weak self] in
                 self?.hideLane(deviceID: deviceID, generation: generation)
             }
+        }
+        if Thread.isMainThread {
+            update()
+        } else {
+            DispatchQueue.main.async(execute: update)
+        }
+    }
+
+    func hide(deviceID: String) {
+        let update = {
+            self.lanes.removeValue(forKey: AppConfig.normalizedDeviceID(deviceID))
+            self.render()
+        }
+        if Thread.isMainThread {
+            update()
+        } else {
+            DispatchQueue.main.async(execute: update)
         }
     }
 
@@ -192,10 +209,12 @@ final class SubtitleController {
     }
 
     private func hideWindow() {
+        let hideGeneration = generation
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.12
             window.animator().alphaValue = 0
         } completionHandler: {
+            guard self.generation == hideGeneration, self.lanes.isEmpty else { return }
             self.window.orderOut(nil)
         }
     }

@@ -81,10 +81,27 @@ final class ASRWebSocketClient: ASRClient {
         let payloadText: String?
     }
 
+    private struct CallbackSnapshot {
+        let onPartial: ((String) -> Void)?
+        let onSegment: ((ASRSegment) -> Void)?
+        let onFinal: ((String) -> Void)?
+        let onError: ((String) -> Void)?
+        let onUpgradeURL: ((URL, String) -> Void)?
+    }
+
+    private struct DeliveryContext {
+        let ticket: CallbackDeliveryGate.Ticket
+        let callbacks: CallbackSnapshot
+    }
+
     private let config: AppConfig
     private let resultType: ASRResultType
     private let showUtterances: Bool
     private let queue = DispatchQueue(label: "VoiceStick.ASRWebSocketClient")
+    private let callbackDeliveryGate = CallbackDeliveryGate()
+    // This context belongs to the serial queue's session, not the latest
+    // public start request. Old packets must never acquire a newer ticket.
+    private var sessionDeliveryContext: DeliveryContext?
     private var webSocket: URLSessionWebSocketTask?
     private var connectionState: ConnectionState = .disconnected
     private var sessionState: SessionState = .idle
@@ -113,7 +130,17 @@ final class ASRWebSocketClient: ASRClient {
 
     @discardableResult
     func start(options: ASRSessionOptions) -> Bool {
-        startSession(options: options)
+        let context = DeliveryContext(
+            ticket: callbackDeliveryGate.begin(),
+            callbacks: CallbackSnapshot(
+                onPartial: onPartial,
+                onSegment: onSegment,
+                onFinal: onFinal,
+                onError: onError,
+                onUpgradeURL: onUpgradeURL
+            )
+        )
+        return startSession(options: options, deliveryContext: context)
     }
 
     func prewarm() {
@@ -132,24 +159,33 @@ final class ASRWebSocketClient: ASRClient {
         connectWebSocket()
     }
 
-    private func startSession(options: ASRSessionOptions) -> Bool {
+    private func startSession(options: ASRSessionOptions, deliveryContext: DeliveryContext) -> Bool {
         let apiKey = providerAPIKey
         guard !apiKey.isEmpty else {
             let message = "Missing ASR API key"
             NSLog("ASR config error: \(message)")
-            onError?(message)
+            rejectStart(message, deliveryContext: deliveryContext)
             return false
         }
 
         guard URL(string: providerWebSocketURL) != nil else {
-            onError?("Invalid ASR URL")
+            rejectStart("Invalid ASR URL", deliveryContext: deliveryContext)
             return false
         }
 
         queue.async { [weak self] in
-            self?.beginSession(options: options)
+            self?.beginSession(options: options, deliveryContext: deliveryContext)
         }
         return true
+    }
+
+    private func rejectStart(_ message: String, deliveryContext: DeliveryContext) {
+        // A failed new request still supersedes the older callback lifetime.
+        // Its delayed cleanup may only cancel the obsolete serial session.
+        queue.async { [weak self] in
+            self?.cancelSupersededSession()
+        }
+        notifyError(message, deliveryContext: deliveryContext)
     }
 
     private var providerAPIKey: String {
@@ -171,29 +207,49 @@ final class ASRWebSocketClient: ASRClient {
     }
 
     func sendOggOpusChunk(_ data: Data, isLast: Bool) {
+        guard let ticket = callbackDeliveryGate.currentTicket else { return }
         queue.async { [weak self] in
-            self?.sendAudioChunk(data, isLast: isLast)
+            guard let self, self.isCurrentSerialSession(ticket) else { return }
+            self.sendAudioChunk(data, isLast: isLast)
         }
     }
 
     func finish() {
+        guard let ticket = callbackDeliveryGate.currentTicket else { return }
         queue.async { [weak self] in
-            self?.finishSessionIfNeeded()
+            guard let self, self.isCurrentSerialSession(ticket) else { return }
+            self.finishSessionIfNeeded()
         }
     }
 
     func cancel() {
+        callbackDeliveryGate.invalidate()
         queue.async { [weak self] in
-            self?.cancelSession()
+            self?.cancelSupersededSession()
         }
     }
 
-    private func beginSession(options: ASRSessionOptions) {
-        guard sessionState == .idle else {
-            notifyError("ASR session already active")
+    private func cancelSupersededSession() {
+        if let context = sessionDeliveryContext,
+           callbackDeliveryGate.isCurrent(context.ticket) {
             return
         }
+        cancelSession()
+    }
 
+    private func isCurrentSerialSession(_ ticket: CallbackDeliveryGate.Ticket) -> Bool {
+        sessionDeliveryContext?.ticket == ticket && callbackDeliveryGate.isCurrent(ticket)
+    }
+
+    private func beginSession(options: ASRSessionOptions, deliveryContext: DeliveryContext) {
+        guard callbackDeliveryGate.isCurrent(deliveryContext.ticket) else { return }
+        // Concurrent public starts are latest-request-wins. Keep the existing
+        // connection while cancelling an obsolete session with the same protocol.
+        if sessionState != .idle {
+            cancelSession()
+        }
+
+        sessionDeliveryContext = deliveryContext
         currentSessionID = UUID().uuidString
         sessionOptions = options
         latestSessionTranscript = ""
@@ -295,6 +351,9 @@ final class ASRWebSocketClient: ASRClient {
     }
 
     private func cancelSession() {
+        if let context = sessionDeliveryContext {
+            callbackDeliveryGate.invalidate(context.ticket)
+        }
         if sessionState == .starting || sessionState == .streaming || sessionState == .finishing {
             if let currentSessionID {
                 sendEvent(.cancelSession, sessionID: currentSessionID, payload: connectionPayload())
@@ -305,6 +364,7 @@ final class ASRWebSocketClient: ASRClient {
         latestSessionTranscript = ""
         emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
         currentSessionID = nil
+        sessionDeliveryContext = nil
         sessionState = .idle
     }
 
@@ -326,19 +386,43 @@ final class ASRWebSocketClient: ASRClient {
         connectionState = .disconnected
     }
 
-    private func failSession(_ message: String) {
+    private func failSession(_ message: String, upgradeURL: URL? = nil) {
+        let deliveryContext = sessionDeliveryContext
         queuedAudioChunks.removeAll(keepingCapacity: true)
         latestSessionTranscript = ""
         emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
         currentSessionID = nil
+        sessionDeliveryContext = nil
         sessionState = .idle
         closeWebSocket(sendFinishConnection: false)
-        notifyError(message)
+        guard let deliveryContext else {
+            // Connection-only prewarm has no user recognition cycle. In
+            // particular, an idle socket error must not resurrect an ASR alert.
+            DiagnosticLog.write("asr_idle_connection_failed")
+            return
+        }
+        notifyError(message, deliveryContext: deliveryContext, upgradeURL: upgradeURL)
     }
 
-    private func notifyError(_ message: String) {
-        DispatchQueue.main.async { [weak self] in
-            self?.onError?(message)
+    private func deliverCallbacks(
+        for context: DeliveryContext,
+        perform action: @escaping (CallbackSnapshot) -> Void
+    ) {
+        let callbacks = context.callbacks
+        let delivery = callbackDeliveryGate.snapshotDelivery(for: context.ticket) {
+            action(callbacks)
+        }
+        DispatchQueue.main.async(execute: delivery)
+    }
+
+    private func notifyError(_ message: String, deliveryContext: DeliveryContext, upgradeURL: URL? = nil) {
+        // Preserve error -> upgrade ordering as one notification, even if the
+        // error callback synchronously cancels its recognition cycle.
+        deliverCallbacks(for: deliveryContext) { callbacks in
+            callbacks.onError?(message)
+            if let upgradeURL {
+                callbacks.onUpgradeURL?(upgradeURL, message)
+            }
         }
     }
 
@@ -407,7 +491,11 @@ final class ASRWebSocketClient: ASRClient {
                 if let error {
                     NSLog("ASR send event error: \(error.localizedDescription)")
                     self?.queue.async {
-                        self?.failSession(error.localizedDescription)
+                        guard let self, self.webSocket === sendingTask else { return }
+                        // A delayed send failure from an older session must not
+                        // be assigned to the newer session on a reused socket.
+                        if let sessionID, self.currentSessionID != sessionID { return }
+                        self.failSession(error.localizedDescription)
                     }
                     return
                 }
@@ -522,14 +610,23 @@ final class ASRWebSocketClient: ASRClient {
             }
 
         case .sessionStarted:
-            guard response.sessionID == currentSessionID else { return }
+            guard let currentSessionID,
+                  response.sessionID == currentSessionID,
+                  let context = sessionDeliveryContext,
+                  callbackDeliveryGate.isCurrent(context.ticket)
+            else { return }
             sessionState = .streaming
             NSLog("ASR websocket session_started session_id=\(response.sessionID ?? "")")
             DiagnosticLog.write("asr_session_started queued_audio_chunks=\(queuedAudioChunks.count)")
             flushQueuedAudioChunks()
 
         case .asrResponse, .asrInfo:
-            guard response.sessionID == currentSessionID, let text = response.payloadText else { return }
+            guard let currentSessionID,
+                  response.sessionID == currentSessionID,
+                  let context = sessionDeliveryContext,
+                  callbackDeliveryGate.isCurrent(context.ticket),
+                  let text = response.payloadText
+            else { return }
             if !didReceiveSessionResponse {
                 didReceiveSessionResponse = true
                 DiagnosticLog.write("asr_first_response_received")
@@ -538,15 +635,13 @@ final class ASRWebSocketClient: ASRClient {
             let definiteSegments = extractNewDefiniteSegments(from: text)
             if !transcript.isEmpty {
                 latestSessionTranscript = transcript
-                DispatchQueue.main.async { [weak self] in
-                    self?.onPartial?(transcript)
+                deliverCallbacks(for: context) { callbacks in
+                    callbacks.onPartial?(transcript)
                 }
             }
-            if !definiteSegments.isEmpty {
-                DispatchQueue.main.async { [weak self] in
-                    for segment in definiteSegments {
-                        self?.onSegment?(segment)
-                    }
+            for segment in definiteSegments {
+                deliverCallbacks(for: context) { callbacks in
+                    callbacks.onSegment?(segment)
                 }
             }
 
@@ -554,7 +649,11 @@ final class ASRWebSocketClient: ASRClient {
             break
 
         case .sessionFinished:
-            guard response.sessionID == currentSessionID else { return }
+            guard let currentSessionID,
+                  response.sessionID == currentSessionID,
+                  let context = sessionDeliveryContext,
+                  callbackDeliveryGate.isCurrent(context.ticket)
+            else { return }
             let finalText = response.payloadText.flatMap { text in
                 let transcript = extractTranscript(from: text)
                 return transcript.isEmpty ? nil : transcript
@@ -564,21 +663,30 @@ final class ASRWebSocketClient: ASRClient {
             } ?? []
             NSLog("ASR websocket session_finished session_id=\(response.sessionID ?? "") text_len=\(finalText.count)")
             DiagnosticLog.write("asr_session_finished text_length=\(finalText.count)")
-            currentSessionID = nil
+            self.currentSessionID = nil
+            sessionDeliveryContext = nil
             latestSessionTranscript = ""
             emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
             queuedAudioChunks.removeAll(keepingCapacity: true)
             sessionState = .idle
-            DispatchQueue.main.async { [weak self] in
-                for segment in definiteSegments {
-                    self?.onSegment?(segment)
+            // Clearing the protocol session ID does not invalidate a successful
+            // final delivery. Only cancel or a later start invalidates its ticket.
+            for segment in definiteSegments {
+                deliverCallbacks(for: context) { callbacks in
+                    callbacks.onSegment?(segment)
                 }
-                self?.onFinal?(finalText)
+            }
+            deliverCallbacks(for: context) { callbacks in
+                callbacks.onFinal?(finalText)
             }
 
         case .sessionCanceled:
-            if response.sessionID == currentSessionID {
-                currentSessionID = nil
+            if let currentSessionID, response.sessionID == currentSessionID {
+                if let context = sessionDeliveryContext {
+                    callbackDeliveryGate.invalidate(context.ticket)
+                }
+                self.currentSessionID = nil
+                sessionDeliveryContext = nil
                 latestSessionTranscript = ""
                 emittedDefiniteSegmentKeys.removeAll(keepingCapacity: true)
                 queuedAudioChunks.removeAll(keepingCapacity: true)
@@ -654,12 +762,7 @@ final class ASRWebSocketClient: ASRClient {
         NSLog("ASR server error code=\(code): \(message)")
         DiagnosticLog.write("asr_server_error code=\(code) message_bytes=\(message.utf8.count)")
         let parsedError = parsedErrorMessage(code: code, message: message)
-        failSession(parsedError.message)
-        if let upgradeURL = parsedError.upgradeURL {
-            DispatchQueue.main.async { [weak self] in
-                self?.onUpgradeURL?(upgradeURL, parsedError.message)
-            }
-        }
+        failSession(parsedError.message, upgradeURL: parsedError.upgradeURL)
     }
 
     private func connectionPayload() -> [String: Any] {
