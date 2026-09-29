@@ -36,6 +36,14 @@ let package = Package(
         .systemLibrary(
             name: "CZlib",
             path: "Sources/CZlib"
+        ),
+        .testTarget(
+            name: "VoiceStickAppTests",
+            dependencies: [
+                "VoiceStickApp",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
+            path: "Tests/VoiceStickAppTests"
         )
     ]
 )

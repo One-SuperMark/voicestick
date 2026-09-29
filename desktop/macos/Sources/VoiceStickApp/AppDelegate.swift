@@ -2,11 +2,8 @@ import AppKit
 import Sparkle
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let updaterController = SPUStandardUpdaterController(
-        startingUpdater: true,
-        updaterDelegate: nil,
-        userDriverDelegate: nil
-    )
+    private let updateVersionDisplay: DevelopmentVersionDisplay
+    private let updaterController: SPUStandardUpdaterController
     private var statusController: StatusController?
     private var coordinator: VoiceStickCoordinator?
     private var settingsWindowController: SettingsWindowController?
@@ -16,6 +13,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var accessibilityPermissionPanelController: AccessibilityPermissionPanelController?
     private var dockIconWindowIDs = Set<ObjectIdentifier>()
     private var config = AppConfig.defaults
+
+    override init() {
+        let versionDisplay = DevelopmentVersionDisplay()
+        updateVersionDisplay = versionDisplay
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: versionDisplay
+        )
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureMainMenu()

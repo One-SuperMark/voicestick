@@ -5,6 +5,7 @@
 #   build/VoiceStick-<version>.app
 #   build/VoiceStick-<version>.zip
 #   build/VoiceStick-<version>.signature  (when Sparkle sign_update is available)
+#   --development: local four-part artifact/display version; Apple versions stay three-part
 #
 # Optional environment:
 #   VOICESTICK_APPCAST_URL=<HTTPS appcast URL override for this build>
@@ -13,6 +14,69 @@
 #   SPARKLE_KEY_ACCOUNT=one-supermark-voicestick
 
 set -euo pipefail
+
+# BEGIN LOCAL DEVELOPMENT VERSION HELPERS
+# The state belongs to ignored build output, not to the source version files.
+next_development_revision() {
+    local baseline_version="$1"
+    local state_path="$2"
+    local previous_state previous_version previous_revision state_bytes
+
+    if [ -e "$state_path" ] || [ -L "$state_path" ]; then
+        if [ ! -f "$state_path" ] || [ -L "$state_path" ]; then
+            echo "Error: local development version state must be a regular file." >&2
+            return 1
+        fi
+        state_bytes="$(wc -c < "$state_path")"
+        if [ "$state_bytes" -gt 128 ]; then
+            echo "Error: local development version state is malformed." >&2
+            return 1
+        fi
+        previous_state="$(< "$state_path")"
+        if [ "$state_bytes" -ne "$((${#previous_state} + 1))" ]; then
+            echo "Error: local development version state is malformed." >&2
+            return 1
+        fi
+        if [[ ! "$previous_state" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\ ([1-9][0-9]{0,8})$ ]]; then
+            echo "Error: local development version state is malformed." >&2
+            return 1
+        fi
+        previous_version="${BASH_REMATCH[1]}"
+        previous_revision="${BASH_REMATCH[2]}"
+        if [ "$previous_version" = "$baseline_version" ]; then
+            if [ "$previous_revision" -ge 999999999 ]; then
+                echo "Error: local development revision counter is exhausted." >&2
+                return 1
+            fi
+            printf '%s\n' "$((previous_revision + 1))"
+            return 0
+        fi
+    fi
+
+    printf '1\n'
+}
+
+save_development_revision() {
+    local baseline_version="$1"
+    local revision="$2"
+    local state_path="$3"
+    local temporary_state
+
+    temporary_state="$(mktemp "${state_path}.XXXXXX")" || return 1
+    if ! printf '%s %s\n' "$baseline_version" "$revision" > "$temporary_state" \
+        || ! mv -f "$temporary_state" "$state_path"; then
+        rm -f "$temporary_state"
+        echo "Error: unable to save the local development version state." >&2
+        return 1
+    fi
+}
+
+release_development_lock() {
+    if [ "${DEVELOPMENT_LOCK_ACQUIRED:-0}" = "1" ]; then
+        rmdir "$DEVELOPMENT_LOCK_DIR" || true
+    fi
+}
+# END LOCAL DEVELOPMENT VERSION HELPERS
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$SCRIPT_DIR/.."
@@ -23,6 +87,8 @@ VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
 CONFIG="${1:---release}"
 TARGET_ARCH="arm64"
 SPARKLE_KEY_ACCOUNT="${SPARKLE_KEY_ACCOUNT:-one-supermark-voicestick}"
+DEVELOPMENT_BUILD=0
+ARTIFACT_VERSION="$VERSION"
 
 case "$CONFIG" in
     --release)
@@ -31,8 +97,12 @@ case "$CONFIG" in
     --debug)
         SWIFT_CONFIG="debug"
         ;;
+    --development)
+        SWIFT_CONFIG="release"
+        DEVELOPMENT_BUILD=1
+        ;;
     *)
-        echo "Usage: $0 [--release|--debug]"
+        echo "Usage: $0 [--release|--debug|--development]"
         exit 1
         ;;
 esac
@@ -51,8 +121,30 @@ fi
 
 mkdir -p "$BUILD_DIR"
 
+if [ "$DEVELOPMENT_BUILD" = "1" ]; then
+    DEVELOPMENT_STATE_PATH="$BUILD_DIR/.development-version-state"
+    DEVELOPMENT_LOCK_DIR="$BUILD_DIR/.development-version.lock"
+    if ! mkdir "$DEVELOPMENT_LOCK_DIR" 2>/dev/null; then
+        echo "Error: unable to acquire the local development build lock at $DEVELOPMENT_LOCK_DIR." >&2
+        echo "Another local development build may still be running." >&2
+        echo "If a previous build was interrupted, confirm it has stopped before removing that lock directory." >&2
+        exit 1
+    fi
+    DEVELOPMENT_LOCK_ACQUIRED=1
+    trap release_development_lock EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    DEVELOPMENT_REVISION="$(next_development_revision "$VERSION" "$DEVELOPMENT_STATE_PATH")"
+    ARTIFACT_VERSION="${VERSION}.${DEVELOPMENT_REVISION}"
+fi
+
 echo "===================================="
-echo " VoiceStick macOS Build v$VERSION"
+if [ "$DEVELOPMENT_BUILD" = "1" ]; then
+    echo " VoiceStick Local Development Build $ARTIFACT_VERSION"
+    echo " Apple bundle versions: $VERSION (unchanged)"
+else
+    echo " VoiceStick macOS Build v$VERSION"
+fi
 echo " Architecture: $TARGET_ARCH"
 echo "===================================="
 
@@ -71,7 +163,7 @@ swift build \
     --arch "$TARGET_ARCH" \
     --scratch-path "$SCRATCH"
 
-APP_DIR="$BUILD_DIR/VoiceStick-${VERSION}.app"
+APP_DIR="$BUILD_DIR/VoiceStick-${ARTIFACT_VERSION}.app"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$APP_DIR/Contents/Frameworks"
 
@@ -98,6 +190,12 @@ if [ "$(lipo -archs "$APP_DIR/Contents/MacOS/VoiceStickApp")" != "$TARGET_ARCH" 
 fi
 
 cp "$PLIST" "$APP_DIR/Contents/Info.plist"
+if /usr/libexec/PlistBuddy -c 'Print :VoiceStickDevelopmentVersion' "$APP_DIR/Contents/Info.plist" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c 'Delete :VoiceStickDevelopmentVersion' "$APP_DIR/Contents/Info.plist"
+fi
+if [ "$DEVELOPMENT_BUILD" = "1" ]; then
+    /usr/libexec/PlistBuddy -c "Add :VoiceStickDevelopmentVersion string $ARTIFACT_VERSION" "$APP_DIR/Contents/Info.plist"
+fi
 if [ -n "${VOICESTICK_APPCAST_URL:-}" ]; then
     /usr/libexec/PlistBuddy -c "Set :SUFeedURL $VOICESTICK_APPCAST_URL" "$APP_DIR/Contents/Info.plist"
 fi
@@ -141,7 +239,7 @@ CODESIGN_IDENTITY="-"
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
     CODESIGN_IDENTITY="$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')"
 fi
-if [ "${REQUIRE_DEVELOPER_ID:-0}" = "1" ] && [ "$CODESIGN_IDENTITY" = "-" ]; then
+if { [ "${REQUIRE_DEVELOPER_ID:-0}" = "1" ] || [ "$DEVELOPMENT_BUILD" = "1" ]; } && [ "$CODESIGN_IDENTITY" = "-" ]; then
     echo "Error: a Developer ID Application signing identity is required."
     exit 1
 fi
@@ -165,7 +263,7 @@ fi
 echo "Verifying app signature..."
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
-ZIP_PATH="$BUILD_DIR/VoiceStick-${VERSION}.zip"
+ZIP_PATH="$BUILD_DIR/VoiceStick-${ARTIFACT_VERSION}.zip"
 SIGNATURE_PATH="${ZIP_PATH%.zip}.signature"
 STAGING_DIR="$BUILD_DIR/.sparkle-staging"
 rm -rf "$STAGING_DIR" "$ZIP_PATH" "$SIGNATURE_PATH"
@@ -173,30 +271,39 @@ mkdir -p "$STAGING_DIR"
 ditto --norsrc --noextattr "$APP_DIR" "$STAGING_DIR/VoiceStick.app"
 
 echo ""
-echo "Creating Sparkle ZIP..."
+if [ "$DEVELOPMENT_BUILD" = "1" ]; then
+    echo "Creating local development ZIP (not an update release)..."
+else
+    echo "Creating Sparkle ZIP..."
+fi
 ditto -c -k --norsrc --noextattr --keepParent "$STAGING_DIR/VoiceStick.app" "$ZIP_PATH"
 rm -rf "$STAGING_DIR"
 
-SIGN_TOOL="$(find -L "$DESKTOP_DIR/.build-arm64/artifacts" -name sign_update -type f 2>/dev/null | head -1 || true)"
-if [ -n "$SIGN_TOOL" ] && [ -x "$SIGN_TOOL" ]; then
-    echo "Signing Sparkle ZIP..."
-    if [ -n "${SPARKLE_PRIVATE_ED_KEY:-}" ]; then
-        SIGN_OUTPUT="$(printf '%s' "$SPARKLE_PRIVATE_ED_KEY" | "$SIGN_TOOL" --ed-key-file - "$ZIP_PATH" 2>&1 || true)"
-    else
-        SIGN_OUTPUT="$("$SIGN_TOOL" --account "$SPARKLE_KEY_ACCOUNT" "$ZIP_PATH" 2>&1 || true)"
-    fi
-    echo "$SIGN_OUTPUT"
-    ED_SIGNATURE="$(printf '%s\n' "$SIGN_OUTPUT" | sed -nE 's/.*sparkle:edSignature="([^"]+)".*/\1/p' | head -1)"
-    if [ -n "$ED_SIGNATURE" ]; then
-        printf '%s\n' "$ED_SIGNATURE" > "$SIGNATURE_PATH"
-    elif [ -n "${SPARKLE_PRIVATE_ED_KEY:-}" ]; then
-        echo "Error: Sparkle ZIP signing failed."
-        exit 1
-    else
-        echo "No Sparkle signing key was available; skipping ZIP signature."
-    fi
+if [ "$DEVELOPMENT_BUILD" = "1" ]; then
+    echo "Local development package: skipping Sparkle private key access and update signing."
+    save_development_revision "$VERSION" "$DEVELOPMENT_REVISION" "$DEVELOPMENT_STATE_PATH"
 else
-    echo "WARNING: Sparkle sign_update tool was not found."
+    SIGN_TOOL="$(find -L "$DESKTOP_DIR/.build-arm64/artifacts" -name sign_update -type f 2>/dev/null | head -1 || true)"
+    if [ -n "$SIGN_TOOL" ] && [ -x "$SIGN_TOOL" ]; then
+        echo "Signing Sparkle ZIP..."
+        if [ -n "${SPARKLE_PRIVATE_ED_KEY:-}" ]; then
+            SIGN_OUTPUT="$(printf '%s' "$SPARKLE_PRIVATE_ED_KEY" | "$SIGN_TOOL" --ed-key-file - "$ZIP_PATH" 2>&1 || true)"
+        else
+            SIGN_OUTPUT="$("$SIGN_TOOL" --account "$SPARKLE_KEY_ACCOUNT" "$ZIP_PATH" 2>&1 || true)"
+        fi
+        echo "$SIGN_OUTPUT"
+        ED_SIGNATURE="$(printf '%s\n' "$SIGN_OUTPUT" | sed -nE 's/.*sparkle:edSignature="([^"]+)".*/\1/p' | head -1)"
+        if [ -n "$ED_SIGNATURE" ]; then
+            printf '%s\n' "$ED_SIGNATURE" > "$SIGNATURE_PATH"
+        elif [ -n "${SPARKLE_PRIVATE_ED_KEY:-}" ]; then
+            echo "Error: Sparkle ZIP signing failed."
+            exit 1
+        else
+            echo "No Sparkle signing key was available; skipping ZIP signature."
+        fi
+    else
+        echo "WARNING: Sparkle sign_update tool was not found."
+    fi
 fi
 
 echo ""
@@ -207,4 +314,8 @@ if [ -f "$SIGNATURE_PATH" ]; then
     echo "  Sig: $SIGNATURE_PATH"
 fi
 echo ""
-echo "Next: $SCRIPT_DIR/make-dmg.sh $APP_DIR"
+if [ "$DEVELOPMENT_BUILD" = "1" ]; then
+    echo "Local development only: not notarized or published by this build."
+else
+    echo "Next: $SCRIPT_DIR/make-dmg.sh $APP_DIR"
+fi

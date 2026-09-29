@@ -27,7 +27,7 @@ final class SettingsWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "VoiceStick Settings"
+        window.title = "VoiceStick Settings · \(AppVersion.current.displayLabel)"
         window.isReleasedWhenClosed = false
         super.init(window: window)
         buildContent()

@@ -243,12 +243,6 @@ final class StatusController {
             keyEquivalent: ","
         ))
 
-        menu.addItem(makeMenuItem(
-            title: "打开辅助功能设置",
-            symbolName: "accessibility",
-            action: #selector(openAccessibilitySettings)
-        ))
-
         menu.addItem(NSMenuItem.separator())
         let checkForUpdatesItem = NSMenuItem(
             title: "检查更新…",
@@ -261,12 +255,6 @@ final class StatusController {
             accessibilityDescription: checkForUpdatesItem.title
         )
         menu.addItem(checkForUpdatesItem)
-
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
-        let versionItem = NSMenuItem(title: "当前版本：\(version)", action: nil, keyEquivalent: "")
-        versionItem.isEnabled = false
-        versionItem.image = Self.symbolImage(named: "info.circle", accessibilityDescription: versionItem.title)
-        menu.addItem(versionItem)
 
         menu.addItem(makeMenuItem(
             title: "退出 VoiceStick",
