@@ -10,6 +10,8 @@ private struct OnboardingDevice {
 }
 
 final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CBCentralManagerDelegate, NSTableViewDataSource, NSTableViewDelegate {
+    var onOpenAccessibilityGuide: (() -> Void)?
+
     private enum Step: Int, CaseIterable {
         case device
         case provider
@@ -23,7 +25,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             case .provider:
                 return "ASR Key"
             case .accessibility:
-                return "Accessibility"
+                return "辅助功能"
             case .finish:
                 return "Ready"
             }
@@ -45,7 +47,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     private let applyTrialAPIKeyButton = NSButton(title: "Apply Trial", target: nil, action: nil)
     private let resourcePopup = NSPopUpButton()
     private let accessibilityStatusLabel = NSTextField(labelWithString: "")
-    private let accessibilitySettingsButton = NSButton(title: "Open Accessibility Settings", target: nil, action: nil)
+    private let accessibilitySettingsButton = NSButton(title: "打开授权引导…", target: nil, action: nil)
 
     private var central: CBCentralManager?
     private var devices: [OnboardingDevice] = []
@@ -212,8 +214,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             detailLabel.stringValue = "Pick the ASR provider and enter the key or endpoint settings it needs."
             contentStack.addArrangedSubview(providerView())
         case .accessibility:
-            titleLabel.stringValue = "Allow text insertion"
-            detailLabel.stringValue = "VoiceStick pastes recognized text at your cursor, so macOS Accessibility permission is required."
+            titleLabel.stringValue = "允许 VoiceStick 输入文字"
+            detailLabel.stringValue = "打开引导，将 VoiceStick 卡片拖入系统设置的辅助功能权限列表，再打开开关。"
             contentStack.addArrangedSubview(accessibilityView())
             updateAccessibilityStatus()
         case .finish:
@@ -470,7 +472,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     }
 
     @objc private func requestAccessibilityPermission() {
-        openAccessibilitySettings()
+        onOpenAccessibilityGuide?()
         updateAccessibilityStatus()
     }
 
@@ -479,54 +481,11 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         updateAccessibilityStatus()
     }
 
-    private func openAccessibilitySettings() {
-        let appPaths = [
-            "/System/Applications/System Settings.app",
-            "/System/Applications/System Preferences.app"
-        ]
-        for path in appPaths {
-            let url = URL(fileURLWithPath: path)
-            guard FileManager.default.fileExists(atPath: url.path) else { continue }
-            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
-                DispatchQueue.main.async {
-                    if error == nil {
-                        self?.statusLabel.stringValue = "Opened System Settings."
-                        self?.openAccessibilityPaneURL()
-                    } else {
-                        self?.openAccessibilityPaneURL()
-                    }
-                }
-            }
-            return
-        }
-
-        openAccessibilityPaneURL()
-    }
-
-    private func openAccessibilityPaneURL() {
-        let urls = [
-            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-            "x-apple.systempreferences:com.apple.preference.universalaccess"
-        ]
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            for text in urls {
-                guard let url = URL(string: text) else { continue }
-                if NSWorkspace.shared.open(url) {
-                    self.statusLabel.stringValue = "Opened System Settings."
-                    return
-                }
-            }
-            self.statusLabel.stringValue = "Open System Settings, then go to Privacy & Security > Accessibility."
-        }
-    }
-
     @objc private func updateAccessibilityStatus() {
         let isTrusted = AXIsProcessTrusted()
         accessibilityStatusLabel.stringValue = isTrusted
-            ? "Accessibility permission is allowed."
-            : "Accessibility permission is not allowed yet."
+            ? "辅助功能权限已开启。"
+            : "尚未开启辅助功能权限。"
         accessibilitySettingsButton.isHidden = isTrusted
         if isTrusted {
             statusLabel.stringValue = ""
@@ -583,7 +542,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             }
         case .accessibility:
             if !AXIsProcessTrusted() {
-                statusLabel.stringValue = "Allow Accessibility permission before continuing."
+                statusLabel.stringValue = "请先开启辅助功能权限，再继续。"
                 updateNextButton()
                 return false
             }

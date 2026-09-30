@@ -181,6 +181,12 @@ final class StatusController {
             keyEquivalent: ","
         ))
 
+        menu.addItem(makeMenuItem(
+            title: "辅助功能授权引导…",
+            symbolName: "accessibility",
+            action: #selector(openAccessibilitySettings)
+        ))
+
         menu.addItem(NSMenuItem.separator())
         let checkForUpdatesItem = NSMenuItem(
             title: "检查更新…",

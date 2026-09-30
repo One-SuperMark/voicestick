@@ -68,45 +68,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openAccessibilitySettings() {
-        let settingsURLs = [
-            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-            "x-apple.systempreferences:com.apple.preference.universalaccess"
-        ]
-        for text in settingsURLs {
-            guard let url = URL(string: text) else { continue }
-            if NSWorkspace.shared.open(url) {
-                break
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            let controller = self?.accessibilityPermissionPanelController
-                ?? AccessibilityPermissionPanelController()
-            self?.accessibilityPermissionPanelController = controller
-            controller.show()
-            self?.activateSystemSettings(attempt: 0)
-        }
-    }
-
-    private func activateSystemSettings(attempt: Int) {
-        let identifiers = [
-            "com.apple.systempreferences",
-            "com.apple.SystemSettings"
-        ]
-        let systemSettings = identifiers
-            .flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0) }
-            .first
-
-        if let systemSettings {
-            systemSettings.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-        }
-
-        // System Settings may still be launching when the URL scheme succeeds.
-        // Retry briefly so the permission page reliably becomes the front app.
-        guard attempt < 5 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.activateSystemSettings(attempt: attempt + 1)
-        }
+        let controller = accessibilityPermissionPanelController ?? AccessibilityPermissionPanelController()
+        accessibilityPermissionPanelController = controller
+        controller.show()
     }
 
     private func startApp(config: AppConfig) {
@@ -344,6 +308,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.startApp(config: config)
         }
         onboardingWindowController = controller
+        controller.onOpenAccessibilityGuide = { [weak self] in
+            self?.openAccessibilitySettings()
+        }
         showDockIconWhileWindowVisible(controller)
         controller.show()
     }
