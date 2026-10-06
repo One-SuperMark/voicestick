@@ -4,6 +4,7 @@ final class StatusController {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let updateCheckController: UpdateCheckController
+    private let launchAtLoginController = LaunchAtLoginController()
     private var overlays: [String: OverlayController] = [:]
     private var visibleOverlayKeys: Set<String> = []
 
@@ -67,6 +68,7 @@ final class StatusController {
         self.deviceOutputProfiles = deviceOutputProfiles
         self.needsPairing = pairedDeviceIDs.isEmpty
         self.presentationState = StatusPresentationState(pairedDeviceIDs: Set(pairedDeviceIDs))
+        menu.delegate = launchAtLoginController
         updateStatusButton(presentationState.displayedStatus)
         rebuildMenu()
     }
@@ -169,27 +171,29 @@ final class StatusController {
         addInputItems()
 
         menu.addItem(makeMenuItem(
-            title: "配对设备…",
+            title: "配对设备",
             symbolName: "dot.radiowaves.left.and.right",
             action: #selector(pairDevice)
         ))
 
         menu.addItem(makeMenuItem(
-            title: "设置…",
+            title: "设置",
             symbolName: "gearshape",
             action: #selector(openSettings),
             keyEquivalent: ","
         ))
 
         menu.addItem(makeMenuItem(
-            title: "辅助功能授权引导…",
+            title: "辅助功能授权引导",
             symbolName: "accessibility",
             action: #selector(openAccessibilitySettings)
         ))
 
+        launchAtLoginController.addMenuItems(to: menu)
+
         menu.addItem(NSMenuItem.separator())
         let checkForUpdatesItem = NSMenuItem(
-            title: "检查更新…",
+            title: "检查更新",
             action: #selector(UpdateCheckController.checkForUpdates(_:)),
             keyEquivalent: ""
         )
@@ -467,7 +471,7 @@ final class StatusController {
 
         if info?.updateAvailable == true, let latestVersion = info?.latestVersion {
             let updateItem = makeMenuItem(
-                title: "更新到 \(latestVersion)…",
+                title: "更新到 \(latestVersion)",
                 symbolName: "square.and.arrow.down",
                 action: #selector(updateFirmwareForDevice)
             )
